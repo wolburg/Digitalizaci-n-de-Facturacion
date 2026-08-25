@@ -1,0 +1,15 @@
+# Datos y credenciales (NO subir)
+data/
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# Sistema
+.DS_Store
+Thumbs.db
