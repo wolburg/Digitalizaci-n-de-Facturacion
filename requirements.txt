@@ -5,3 +5,4 @@ streamlit-authenticator==0.2.3
 gspread
 google-auth
 bcrypt
+pdfplumber
