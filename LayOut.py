@@ -21,7 +21,7 @@ IVA_RATE = 0.16
 ASESORES = ["Jorge Orozco", "Andrea Dávila", "Ximena Mora",
             "Marco Ochoa", "Eduardo Jáquez", "Negocios-FINARQ"]
 
-PRODUCTOS = ["FX", "Terminal Punto de Venta", "Crédito", "Divisas",
+PRODUCTOS = ["FX", "Terminal Punto de Venta", "Crédito",
              "Arrendamiento", "Honorarios / Asesoría", "Credito TPV"]
 
 ESTATUS = ["PENDIENTE", "TIMBRADA", "PAGADA"]
@@ -549,7 +549,8 @@ if vista.startswith("📝"):
             with c4:
                 base = st.number_input("Volumen", min_value=0.0, step=100.0, format="%.2f")
             with c5:
-                ingreso = st.number_input("Subtotal (Ingreso)", min_value=0.0, step=100.0, format="%.2f")
+                tasa = st.number_input("Tasa", min_value=0.0, max_value=100.0, step=0.5, format="%.2f",
+                                       help="Subtotal (Ingreso) = Volumen × Tasa / 100")
             codigo_sat = st.text_input("CÓDIGO SAT", value=FX_CODIGO_SAT if es_fx else "")
             enviar = st.form_submit_button("💾 Guardar registro", use_container_width=True)
 
@@ -563,7 +564,7 @@ if vista.startswith("📝"):
             else:
                 if es_fx and cliente not in clientes_fx:
                     agregar_cliente_fx(cliente)      
-                subtotal = round(ingreso, 2)
+                subtotal = round(base * tasa / 100, 2)
                 iva = round(subtotal * IVA_RATE, 2)
                 fila = {c: "" for c in COLUMNS}
                 fila.update({
@@ -611,9 +612,6 @@ if vista.startswith("📝"):
                      "BASE (Volumen)", "SUBTOTAL (INGRESO)", "IVA", "TOTAL",
                      "ESTATUS DE PAGO", "ID"]].copy()
             d.insert(0, "Estado", col_estado(dfx))
-            for mc in ["BASE (Volumen)", "SUBTOTAL (INGRESO)", "IVA", "TOTAL"]:
-                d[mc] = d[mc].map(fmt_money)
-
             for mc in ["BASE (Volumen)", "SUBTOTAL (INGRESO)", "IVA", "TOTAL"]:
                 d[mc] = d[mc].map(fmt_money)
             d = d[["Estado", "ESTATUS DE PAGO"] +
