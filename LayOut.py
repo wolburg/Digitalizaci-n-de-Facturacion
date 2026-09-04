@@ -659,7 +659,7 @@ if vista.startswith("📝"):
                         st.rerun()
 
                 if st.button("💾 Guardar cambios"):
-                    full = leer_registros()
+                    full = leer_registros().astype(object)
                     for _, r in editado.iterrows():
                         idx = full.index[full["ID"] == r["ID"]]
                         if len(idx):
