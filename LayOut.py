@@ -354,18 +354,57 @@ def _get_worksheet():
     import gspread
     from google.oauth2.service_account import Credentials
 
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_info(
-        dict(st.secrets["gcp_service_account"]), scopes=scopes)
-    gc = gspread.authorize(creds)
-    sh = gc.open_by_key(st.secrets["sheet_id"])
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets"
+    ]
+
+    try:
+        creds = Credentials.from_service_account_info(
+            dict(st.secrets["gcp_service_account"]),
+            scopes=scopes
+        )
+
+        st.write("Correo usado:", creds.service_account_email)
+        st.write("Proyecto:", creds.project_id)
+        st.write("Sheet ID:", st.secrets["sheet_id"])
+
+        gc = gspread.authorize(creds)
+
+    except Exception as e:
+        st.error("ERROR EN AUTENTICACIÓN")
+        st.exception(e)
+        raise
+
+    try:
+        sh = gc.open_by_key(st.secrets["sheet_id"])
+
+    except PermissionError as e:
+        st.error("ERROR AL ABRIR GOOGLE SHEETS")
+        st.write("Cuenta utilizada:", creds.service_account_email)
+        st.write("Proyecto:", creds.project_id)
+        st.write("Sheet ID:", st.secrets["sheet_id"])
+
+        # Intentar mostrar la causa original
+        if e.__cause__:
+            st.write("Error original:")
+            st.exception(e.__cause__)
+
+        raise
+
     try:
         ws = sh.worksheet("LayOut")
-    except Exception:
-        ws = sh.add_worksheet(title="LayOut", rows=1000, cols=len(COLUMNS))
+
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(
+            title="LayOut",
+            rows=1000,
+            cols=len(COLUMNS)
+        )
         ws.append_row(COLUMNS)
+
     if ws.row_values(1) != COLUMNS:
-        ws.update([COLUMNS], "A1")
+        ws.update("A1", [COLUMNS])
+
     return ws
 
 
