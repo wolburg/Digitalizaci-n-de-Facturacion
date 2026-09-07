@@ -363,11 +363,6 @@ def _get_worksheet():
             dict(st.secrets["gcp_service_account"]),
             scopes=scopes
         )
-
-        st.write("Correo usado:", creds.service_account_email)
-        st.write("Proyecto:", creds.project_id)
-        st.write("Sheet ID:", st.secrets["sheet_id"])
-
         gc = gspread.authorize(creds)
 
     except Exception as e:
