@@ -351,7 +351,6 @@ def _usar_sheets() -> bool:
 
 @st.cache_resource(show_spinner=False)
 def _get_worksheet():
-    """Devuelve el worksheet 'LayOut' de Google Sheets (crea encabezados si falta)."""
     import gspread
     from google.oauth2.service_account import Credentials
 
@@ -366,7 +365,7 @@ def _get_worksheet():
         ws = sh.add_worksheet(title="LayOut", rows=1000, cols=len(COLUMNS))
         ws.append_row(COLUMNS)
     if ws.row_values(1) != COLUMNS:
-        ws.update("A1", [COLUMNS])
+        ws.update([COLUMNS], "A1")
     return ws
 
 
@@ -403,12 +402,11 @@ def guardar_registro(fila: dict):
 
 
 def sobrescribir_registros(df: pd.DataFrame):
-    """Reemplaza TODOS los registros (para guardar ediciones)."""
     df = df.reindex(columns=COLUMNS).fillna("")
     if _usar_sheets():
         ws = _get_worksheet()
         ws.clear()
-        ws.update([COLUMNS] + df.astype(str).values.tolist())
+        ws.update([COLUMNS] + df.astype(str).values.tolist(), "A1")
     else:
         os.makedirs(os.path.dirname(CSV_PATH), exist_ok=True)
         df.to_csv(CSV_PATH, index=False)
