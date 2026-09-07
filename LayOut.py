@@ -358,7 +358,7 @@ def _get_worksheet():
     creds = Credentials.from_service_account_info(
         dict(st.secrets["gcp_service_account"]), scopes=scopes)
     gc = gspread.authorize(creds)
-    sh = gc.open_by_url(st.secrets["sheet_url"])
+    sh = gc.open_by_key(st.secrets["sheet_id"])
     try:
         ws = sh.worksheet("LayOut")
     except Exception:
