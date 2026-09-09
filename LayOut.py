@@ -275,7 +275,7 @@ def render_facturacion(df: pd.DataFrame):
                     full.loc[idx, "FECHA DE FACTURACION"] = datos["Fecha Emisión"]
                     full.loc[idx, "FOLIO (LISTO P/FACTURA)"] = datos["Número Factura"]
                     sobrescribir_registros(full)
-                    
+
                     st.success(f"✅ Factura {datos['Número Factura']} ligada al registro {sel_id}.")
                     st.rerun()
 
@@ -720,6 +720,26 @@ if vista.startswith("📝"):
             else:
                 with st.expander("Ver registros pagados", expanded=False):
                     st.dataframe(_tabla_lectura(filt_pag), use_container_width=True, hide_index=True)
+                etiquetas_pag = {r["ID"]: f'{r["ID"]} — {r["CLIENTE"]} · {fmt_money(r["TOTAL"])}'
+                                  for _, r in filt_pag.iterrows()}
+                ids_borrar_pag = st.multiselect(
+                    "Eliminar registro(s) pagado(s)",
+                    options=list(etiquetas_pag.keys()),
+                    format_func=lambda x: etiquetas_pag[x],
+                    key="borrar_pag_sel",
+                )
+                cpg, epg = st.columns([1.4, 1.6])
+                with cpg:
+                    confirmar_pag = st.checkbox(f"Confirmar borrado ({len(ids_borrar_pag)})",
+                                                 disabled=not ids_borrar_pag, key="confirmar_pag")
+                with epg:
+                    if st.button("🗑️ Eliminar pagados seleccionados",
+                                  disabled=not (ids_borrar_pag and confirmar_pag)):
+                        full = leer_registros()
+                        full = full[~full["ID"].isin(ids_borrar_pag)]
+                        sobrescribir_registros(full)
+                        st.success(f"🗑️ {len(ids_borrar_pag)} registro(s) eliminado(s).")
+                        st.rerun()
         else:
             st.markdown(f"#### 🟠 Pendientes ({len(filt_pend)})")
             if filt_pend.empty:
