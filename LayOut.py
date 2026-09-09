@@ -795,7 +795,7 @@ else:
                         full.loc[idx, "Comprobante de Pago"] = ref.loc[rid, "_comprobante"]
                         full.loc[idx, "ESTATUS DE PAGO"] = "PAGADA"
                     sobrescribir_registros(full)
-                    st.success(f"✅ Se aplicó el pago a {len(aplicar)} registro(s).")
+                    st.success(f"✅ Se aplicó el pago a {len(aplicar)} registro(s) con éxito.")
                     st.rerun()
                 else:
                     st.info("No marcaste ningún registro.")
