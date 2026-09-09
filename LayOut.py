@@ -273,7 +273,9 @@ def render_facturacion(df: pd.DataFrame):
                     for col in FACTURA_COLS:
                         full.loc[idx, col] = datos[col]
                     full.loc[idx, "FECHA DE FACTURACION"] = datos["Fecha Emisión"]
+                    full.loc[idx, "FOLIO (LISTO P/FACTURA)"] = datos["Número Factura"]
                     sobrescribir_registros(full)
+                    
                     st.success(f"✅ Factura {datos['Número Factura']} ligada al registro {sel_id}.")
                     st.rerun()
 
@@ -642,8 +644,7 @@ if vista.startswith("📝"):
         def _tabla_lectura(dfx):
             d = dfx[["CÓDIGO SAT", "CLIENTE", "CONCEPTO", "PRODUCTO", "Asesor",
                      "BASE (Volumen)", "SUBTOTAL (INGRESO)", "IVA", "TOTAL",
-                     "ESTATUS DE PAGO", "Número Factura", "Fecha Emisión",
-                     "Método de Pago", "ID"]].copy()
+                     "ESTATUS DE PAGO", "ID"]].copy()
             d.insert(0, "Estado", col_estado(dfx))
             for mc in ["BASE (Volumen)", "SUBTOTAL (INGRESO)", "IVA", "TOTAL"]:
                 d[mc] = d[mc].map(fmt_money)
@@ -657,7 +658,7 @@ if vista.startswith("📝"):
             if filt_pend.empty:
                 st.info("No hay registros pendientes.")
             else:
-                tabla = filt_pend[LAYOUT_COLS + FACTURA_COLS].copy()
+                tabla = filt_pend[LAYOUT_COLS].copy()
                 tabla.insert(0, "Estado", col_estado(filt_pend))
                 for mc in MONEY_COLS:
                     tabla[mc] = pd.to_numeric(tabla[mc], errors="coerce")
@@ -675,11 +676,6 @@ if vista.startswith("📝"):
                     "BASE (Volumen)": st.column_config.NumberColumn("BASE (Volumen)", format="$%.2f"),
                     "SUBTOTAL (INGRESO)": st.column_config.NumberColumn("SUBTOTAL (INGRESO)", format="$%.2f"),
                     "🗑️ Eliminar": st.column_config.CheckboxColumn("🗑️ Eliminar"),
-                    "Datos (Factura)": st.column_config.TextColumn("Datos (Factura)", disabled=True),
-                    "Concepto (Factura)": st.column_config.TextColumn("Concepto (Factura)", disabled=True),
-                    "Número Factura": st.column_config.TextColumn("Número Factura", disabled=True),
-                    "Fecha Emisión": st.column_config.TextColumn("Fecha Emisión", disabled=True),
-                    "Método de Pago": st.column_config.TextColumn("Método de Pago", disabled=True),
                     "ESTATUS DE PAGO": st.column_config.SelectboxColumn("ESTATUS DE PAGO", options=ESTATUS),
                 }
                 editado = st.data_editor(tabla, use_container_width=True, hide_index=True,
