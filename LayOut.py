@@ -135,6 +135,7 @@ def parse_cfdi(xml_bytes: bytes) -> dict:
     folio = c.get("Folio") or ""
     num = (serie + "-" if serie else "") + folio
     tfd = c.find(".//tfd:TimbreFiscalDigital", ns)
+    imp = c.find("cfdi:Impuestos", ns)
     return {
         "Datos (Factura)": ", ".join([x for x in (nombre, rfc) if x]),
         "Concepto (Factura)": " | ".join([x for x in conceptos if x]),
@@ -142,6 +143,9 @@ def parse_cfdi(xml_bytes: bytes) -> dict:
         "Fecha Emisión": (c.get("Fecha") or "")[:10],
         "Método de Pago": c.get("MetodoPago") or "",
         "_Total": c.get("Total") or "",
+        "_Subtotal": c.get("SubTotal") or c.get("Subtotal") or "",
+        "_Descuento": c.get("Descuento") or "",
+        "_IVA": (imp.get("TotalImpuestosTrasladados") if imp is not None else "") or "",
         "_UUID": tfd.get("UUID") if tfd is not None else "",
         "_Conceptos": [x for x in conceptos if x],
     }
@@ -235,49 +239,105 @@ def match_deposito(total, deps):
             return d
     return None
 
+def montos_xml(datos):
+    total = pd.to_numeric(datos.get("_Total"), errors="coerce")
+    if pd.isna(total):
+        return None
+    sub = pd.to_numeric(datos.get("_Subtotal"), errors="coerce")
+    desc = pd.to_numeric(datos.get("_Descuento"), errors="coerce")
+    iva = pd.to_numeric(datos.get("_IVA"), errors="coerce")
+    if pd.notna(sub) and pd.notna(desc):
+        sub = sub - desc
+    if pd.isna(sub):
+        sub = round(float(total) / (1 + IVA_RATE), 2)
+    if pd.isna(iva):
+        iva = round(float(total) - float(sub), 2)
+    return round(float(sub), 2), round(float(iva), 2), round(float(total), 2)
+
+
+
+def aplicar_factura(full: pd.DataFrame, sel_id: str, datos: dict):
+    full = full.astype(object)
+    idx = full.index[full["ID"] == sel_id]
+    if len(idx) == 0:
+        raise ValueError(f"No se encontró el registro {sel_id}")
+
+    for col in FACTURA_COLS:
+        full.loc[idx, col] = datos[col]
+    full.loc[idx, "FECHA DE FACTURACION"] = datos["Fecha Emisión"]
+    full.loc[idx, "FOLIO (LISTO P/FACTURA)"] = datos["Número Factura"]
+
+    corregido = False
+    m = montos_xml(datos)
+    reg_total = pd.to_numeric(full.loc[idx[0], "TOTAL"], errors="coerce")
+    if m is not None and (pd.isna(reg_total) or abs(m[2] - float(reg_total)) > 0.01):
+        full.loc[idx, "SUBTOTAL (INGRESO)"] = m[0]
+        full.loc[idx, "IVA"] = m[1]
+        full.loc[idx, "TOTAL"] = m[2]
+        corregido = True
+    return full, corregido
+
+
 def render_facturacion(df: pd.DataFrame):
     st.header("📄 Facturación")
     st.markdown("### 📎 Adjuntar factura (XML CFDI) a un registro")
+
+    _flash = st.session_state.pop("flash", None)
+    if _flash:
+        getattr(st, _flash[0])(_flash[1])
+
+    sel_id = st.session_state.get("factura_sel_id")
+    if sel_id not in df["ID"].values:
+        sel_id = None
+
+    xml_file = None
     if df.empty:
         st.info("Primero captura movimientos en el LayOut.")
+    elif not sel_id:
+        st.caption("Marca el 📎 de la fila correspondiente, hasta la derecha en la tabla de abajo, para adjuntar su factura.")
     else:
-        etiquetas = {r["ID"]: f'{r["ID"]} — {r["CLIENTE"]} · {fmt_money(r["TOTAL"])}'
-                     for _, r in df.iterrows()}
-        ca, cb = st.columns([1.2, 1])
-        sel_id = ca.selectbox("Registro", options=list(etiquetas.keys()),
-                              format_func=lambda x: etiquetas[x])
-        xml_file = cb.file_uploader("XML de la factura", type=["xml"])
-        if xml_file is not None:
-            try:
-                datos = parse_cfdi(xml_file.getvalue())
-            except Exception as ex:
-                st.error(f"No se pudo leer el XML: {ex}")
-            else:
-                cliente_reg = str(df.loc[df["ID"] == sel_id, "CLIENTE"].iloc[0])
-                datos["Concepto (Factura)"] = match_concepto(cliente_reg, datos["_Conceptos"])
-                if len(datos["_Conceptos"]) > 1:
-                    st.caption(f"La factura trae {len(datos['_Conceptos'])} descripciones; "
-                               f"se tomó la que coincide con «{cliente_reg}».")
-                st.success("Datos extraídos de la factura:")
-                st.write({k: datos[k] for k in ["Datos (Factura)", "Concepto (Factura)",
-                                                "Número Factura", "Fecha Emisión", "Método de Pago"]})
-                st.caption(f"Total en el XML: {fmt_money(datos['_Total'])} · UUID: {datos['_UUID']}")
-                try:
-                    if datos["_Total"] and abs(float(datos["_Total"]) - float(df.loc[df["ID"] == sel_id, "TOTAL"].iloc[0])) > 0.5:
-                        st.warning("⚠️ El total del XML no coincide con el TOTAL del registro.")
-                except Exception:
-                    pass
-                if st.button("💾 Guardar factura en el registro"):
-                    full = leer_registros()
-                    idx = full.index[full["ID"] == sel_id]
-                    for col in FACTURA_COLS:
-                        full.loc[idx, col] = datos[col]
-                    full.loc[idx, "FECHA DE FACTURACION"] = datos["Fecha Emisión"]
-                    full.loc[idx, "FOLIO (LISTO P/FACTURA)"] = datos["Número Factura"]
-                    sobrescribir_registros(full)
+        cliente_reg_lbl = df.loc[df["ID"] == sel_id, "CLIENTE"].iloc[0]
+        cab, cbb = st.columns([3, 1])
+        cab.success(f"Registro seleccionado: **{sel_id}** — {cliente_reg_lbl}")
+        if cbb.button("✖️ Cambiar registro"):
+            st.session_state["factura_sel_id"] = None
+            st.rerun()
+        xml_file = st.file_uploader("XML de la factura", type=["xml"], key=f"xmlup_{sel_id}")
 
-                    st.success(f"✅ Factura {datos['Número Factura']} ligada al registro {sel_id}.")
-                    st.rerun()
+    if xml_file is not None:
+        try:
+            datos = parse_cfdi(xml_file.getvalue())
+        except Exception as ex:
+            st.error(f"No se pudo leer el XML: {ex}")
+        else:
+            cliente_reg = str(df.loc[df["ID"] == sel_id, "CLIENTE"].iloc[0])
+            datos["Concepto (Factura)"] = match_concepto(cliente_reg, datos["_Conceptos"])
+            if len(datos["_Conceptos"]) > 1:
+                st.caption(f"La factura trae {len(datos['_Conceptos'])} descripciones; "
+                           f"se tomó la que coincide con «{cliente_reg}».")
+            st.success("Datos extraídos de la factura:")
+            st.write({k: datos[k] for k in ["Datos (Factura)", "Concepto (Factura)",
+                                            "Número Factura", "Fecha Emisión", "Método de Pago"]})
+            st.caption(f"Total en el XML: {fmt_money(datos['_Total'])} · UUID: {datos['_UUID']}")
+            try:
+                if datos["_Total"] and abs(float(datos["_Total"]) - float(df.loc[df["ID"] == sel_id, "TOTAL"].iloc[0])) > 0.5:
+                    st.warning("⚠️ El total del XML no coincide con el TOTAL del registro. Se corregirá al guardar.")
+            except Exception:
+                pass
+            if st.button("💾 Guardar factura en el registro"):
+                full, corregido = aplicar_factura(leer_registros(), sel_id, datos)
+                sobrescribir_registros(full)
+                if corregido:
+                    st.session_state["flash"] = (
+                        "warning",
+                        f"Factura {datos['Número Factura']} ligada a {sel_id}. "
+                        f"El total no coincidía: SUBTOTAL, IVA y TOTAL se corrigieron con el XML "
+                        f"(Total {fmt_money(datos['_Total'])}).")
+                else:
+                    st.session_state["flash"] = (
+                        "success", f"Factura {datos['Número Factura']} ligada a {sel_id}.")
+                st.session_state["factura_sel_id"] = None
+                st.rerun()
 
     st.divider()
     master = layout_a_master(df)
@@ -288,7 +348,30 @@ def render_facturacion(df: pd.DataFrame):
         vista_master = master[MASTER_FACT_COLS].copy()
         for col in ["Volumen", "Subtotal", "IVA", "Total"]:
             vista_master[col] = vista_master[col].map(fmt_money)
-        st.dataframe(vista_master, use_container_width=True, hide_index=True)
+
+        ids_list = df["ID"].tolist()
+        prev_sel = st.session_state.get("factura_sel_id")
+        vista_master_sel = vista_master.copy()
+        vista_master_sel["📎"] = [rid == prev_sel for rid in ids_list[:len(vista_master_sel)]]
+
+        cfg_master = {c: st.column_config.TextColumn(c, disabled=True) for c in MASTER_FACT_COLS}
+        cfg_master["📎"] = st.column_config.CheckboxColumn("📎", help="Marca para adjuntar factura a este registro")
+
+        editado_master = st.data_editor(
+            vista_master_sel, use_container_width=True, hide_index=True,
+            key="editor_master_pick", column_config=cfg_master,
+        )
+
+        marcados_idx = editado_master.index[editado_master["📎"] == True].tolist()
+        marcados_ids = [ids_list[i] for i in marcados_idx if i < len(ids_list)]
+        nuevos = [x for x in marcados_ids if x != prev_sel]
+        if nuevos:
+            st.session_state["factura_sel_id"] = nuevos[0]
+            st.rerun()
+        elif not marcados_ids and prev_sel:
+            st.session_state["factura_sel_id"] = None
+            st.rerun()
+
         buf = io.BytesIO()
         with pd.ExcelWriter(buf, engine="openpyxl") as w:
             master[MASTER_FACT_COLS].to_excel(w, index=False, sheet_name="Registro Maestro")
