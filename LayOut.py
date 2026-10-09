@@ -26,8 +26,8 @@ PRODUCTOS = ["FX", "Terminal Punto de Venta", "Crédito",
 
 ESTATUS = ["PENDIENTE", "TIMBRADA", "PAGADA"]
 
-MESES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
-         "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+MESES_CORTO = ["ENE", "FEB", "MAR", "ABR", "MAY", "JUN",
+               "JUL", "AGO", "SEP", "OCT", "NOV", "DIC"]
 
 COLUMNS = [
     "CÓDIGO SAT", "CLIENTE", "CONCEPTO", "PRODUCTO", "Aliado Comercial", "Asesor",
@@ -169,7 +169,7 @@ def layout_a_master(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return out
     _f = pd.to_datetime(df["FECHA DE FACTURACION"], errors="coerce")
-    out["Mes"] = _f.dt.month.map(lambda n: MESES[int(n) - 1] if pd.notna(n) else "")
+    out["Mes"] = _f.map(lambda d: f"{MESES_CORTO[d.month - 1]}-{d.year}" if pd.notna(d) else "")
     out["Cliente/Proveedor"] = df["CLIENTE"].values
     out["Asesor"] = df["Asesor"].values
     out["Producto"] = df["PRODUCTO"].values
@@ -277,6 +277,42 @@ def aplicar_factura(full: pd.DataFrame, sel_id: str, datos: dict):
         corregido = True
     return full, corregido
 
+def filtros_master(df: pd.DataFrame, key: str) -> pd.DataFrame:
+    if df.empty:
+        return df
+    _f = pd.to_datetime(df["FECHA DE FACTURACION"], errors="coerce")
+    _fp = df["FECHA DE PAGO"].fillna("").astype(str).str.strip()
+    _pr = df["Pago Real"].fillna("").astype(str)
+    _p = pd.to_datetime(_fp.where(_fp != "", _pr), errors="coerce")
+
+    def _opts(col):
+        return sorted([x for x in df[col].dropna().unique() if str(x).strip()])
+
+    st.markdown("##### 🔎 Filtros")
+    r1 = st.columns(4)
+    f_est = r1[0].multiselect("Estatus de pago", ESTATUS, key=f"{key}_est")
+    f_cli = r1[1].multiselect("Cliente", _opts("CLIENTE"), key=f"{key}_cli")
+    f_ase = r1[2].multiselect("Asesor", _opts("Asesor"), key=f"{key}_ase")
+    f_pro = r1[3].multiselect("Producto", _opts("PRODUCTO"), key=f"{key}_pro")
+    r2 = st.columns(4)
+    f_ali = r2[0].multiselect("Aliado comercial", _opts("Aliado Comercial"), key=f"{key}_ali")
+    f_met = r2[1].multiselect("Método de pago", _opts("Método de Pago"), key=f"{key}_met")
+    f_ffa = r2[2].date_input("Fecha de facturación (rango)", value=(), format="YYYY-MM-DD", key=f"{key}_ffa")
+    f_fpa = r2[3].date_input("Fecha de pago (rango)", value=(), format="YYYY-MM-DD", key=f"{key}_fpa")
+
+    m = pd.Series(True, index=df.index)
+    if f_est: m &= df["ESTATUS DE PAGO"].astype(str).str.upper().isin(f_est)
+    if f_cli: m &= df["CLIENTE"].isin(f_cli)
+    if f_ase: m &= df["Asesor"].isin(f_ase)
+    if f_pro: m &= df["PRODUCTO"].isin(f_pro)
+    if f_ali: m &= df["Aliado Comercial"].isin(f_ali)
+    if f_met: m &= df["Método de Pago"].isin(f_met)
+    if len(f_ffa) == 2:
+        m &= _f.between(pd.Timestamp(f_ffa[0]), pd.Timestamp(f_ffa[1]))
+    if len(f_fpa) == 2:
+        m &= _p.between(pd.Timestamp(f_fpa[0]), pd.Timestamp(f_fpa[1]))
+    return df[m]
+
 
 def render_facturacion(df: pd.DataFrame):
     st.header("📄 Facturación")
@@ -340,16 +376,17 @@ def render_facturacion(df: pd.DataFrame):
                 st.rerun()
 
     st.divider()
-    master = layout_a_master(df)
+    df_m = filtros_master(df, "mf")
+    master = layout_a_master(df_m)
     st.metric("Movimientos en el Registro Máster", len(master))
     if master.empty:
-        st.info("Aún no hay movimientos en el LayOut.")
+        st.info("No hay movimientos para mostrar.")
     else:
-        vista_master = master[MASTER_FACT_COLS].copy()
+        vista_master = master[MASTER_FACT_COLS].copy().reset_index(drop=True)
         for col in ["Volumen", "Subtotal", "IVA", "Total"]:
             vista_master[col] = vista_master[col].map(fmt_money)
 
-        ids_list = df["ID"].tolist()
+        ids_list = df_m["ID"].tolist()
         prev_sel = st.session_state.get("factura_sel_id")
         vista_master_sel = vista_master.copy()
         vista_master_sel["📎"] = [rid == prev_sel for rid in ids_list[:len(vista_master_sel)]]
@@ -359,7 +396,7 @@ def render_facturacion(df: pd.DataFrame):
 
         editado_master = st.data_editor(
             vista_master_sel, use_container_width=True, hide_index=True,
-            key="editor_master_pick", column_config=cfg_master,
+            key=f"editor_master_pick_{abs(hash(tuple(ids_list)))}", column_config=cfg_master,
         )
 
         marcados_idx = editado_master.index[editado_master["📎"] == True].tolist()
@@ -554,7 +591,7 @@ def es_completo(fila) -> bool:
  
  
 def col_estado(df: pd.DataFrame) -> pd.Series:
-    return df.apply(lambda r: "🟢 Completo" if es_completo(r) else "🔴 Incompleto", axis=1)
+    return df.apply(lambda r: "🟢" if es_completo(r) else "🔴", axis=1)
 
 # LOGIN
 authenticator.login("Iniciar sesión", location="main")
@@ -705,22 +742,41 @@ if vista.startswith("📝"):
     else:
         estado = col_estado(df)
         _f = pd.to_datetime(df["FECHA DE FACTURACION"], errors="coerce")
+        _fp = df["FECHA DE PAGO"].fillna("").astype(str).str.strip()
+        _pr = df["Pago Real"].fillna("").astype(str)
+        _p = pd.to_datetime(_fp.where(_fp != "", _pr), errors="coerce")
+
         df_v = df.copy()
         df_v["_Año"] = _f.dt.year
-        df_v["_Mes"] = _f.dt.month.map(lambda n: MESES[int(n) - 1] if pd.notna(n) else "")
- 
-        with st.expander("🔎 Filtros", expanded=False):
-            a, b, c = st.columns(3)
-            f_est = a.multiselect("Estado", ["🔴 Incompleto", "🟢 Completo"])
-            f_cli = b.multiselect("Cliente", sorted([x for x in df_v["CLIENTE"].dropna().unique() if str(x).strip()]))
-            f_ase = c.multiselect("Asesor", sorted([x for x in df_v["Asesor"].dropna().unique() if str(x).strip()]))
- 
+        df_v["_Mes"] = _f.map(lambda d: f"{MESES_CORTO[d.month - 1]}-{d.year}" if pd.notna(d) else "")
+        df_v["_FFact"] = _f
+        df_v["_FPago"] = _p
+
+        def _opts(col):
+            return sorted([x for x in df_v[col].dropna().unique() if str(x).strip()])
+
+        st.markdown("##### 🔎 Filtros")
+        r1 = st.columns(4)
+        f_est = r1[0].multiselect("Estatus de pago", ESTATUS)
+        f_cli = r1[1].multiselect("Cliente", _opts("CLIENTE"))
+        f_ase = r1[2].multiselect("Asesor", _opts("Asesor"))
+        f_pro = r1[3].multiselect("Producto", _opts("PRODUCTO"))
+        r2 = st.columns(3)
+        f_ali = r2[0].multiselect("Aliado comercial", _opts("Aliado Comercial"))
+        f_ffa = r2[1].date_input("Fecha de facturación (rango)", value=(), format="YYYY-MM-DD", key="f_ffa")
+        f_fpa = r2[2].date_input("Fecha de pago (rango)", value=(), format="YYYY-MM-DD", key="f_fpa")
+
         m = pd.Series(True, index=df_v.index)
-        if f_est: m &= estado.isin(f_est)
+        if f_est: m &= df_v["ESTATUS DE PAGO"].astype(str).str.upper().isin(f_est)
         if f_cli: m &= df_v["CLIENTE"].isin(f_cli)
         if f_ase: m &= df_v["Asesor"].isin(f_ase)
+        if f_pro: m &= df_v["PRODUCTO"].isin(f_pro)
+        if f_ali: m &= df_v["Aliado Comercial"].isin(f_ali)
+        if len(f_ffa) == 2:
+            m &= df_v["_FFact"].between(pd.Timestamp(f_ffa[0]), pd.Timestamp(f_ffa[1]))
+        if len(f_fpa) == 2:
+            m &= df_v["_FPago"].between(pd.Timestamp(f_fpa[0]), pd.Timestamp(f_fpa[1]))
         filt = df_v[m]
-        st.caption(f"Mostrando {len(filt)} de {len(df_v)} registros.")
         es_pag = filt["ESTATUS DE PAGO"].astype(str).str.upper() == "PAGADA"
         filt_pend, filt_pag = filt[~es_pag], filt[es_pag]
 
@@ -903,7 +959,7 @@ else:
     if not df.empty:
         st.divider()
         st.markdown("### 📋 Registro Máster completo")
-        master = layout_a_master(df)
+        master = layout_a_master(filtros_master(df, "mc"))
         vm = master.copy()
         for col in ["Volumen", "Subtotal", "IVA", "Total"]:
             vm[col] = vm[col].map(fmt_money)
