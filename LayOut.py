@@ -1,6 +1,7 @@
 import io
 import os
 import calendar
+import zipfile
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta
 import unicodedata
@@ -75,6 +76,11 @@ MASTER_FACT_COLS = [c for c in MASTER_COLS if c not in ESTADO_CUENTA_COLS]
 # Valores predeterminados para FX
 FX_ALIADO = "INVEX"
 FX_CODIGO_SAT = "84121701"
+
+# Valores predeterminados para registros creados desde XML (Kushki)
+KUSHKI_ALIADO = "KUSHKI"
+KUSHKI_PRODUCTO = "Terminal Punto de Venta"
+KUSHKI_ASESOR = "Negocios-FINARQ"
 CLIENTES_FX_DEFAULT = [
     "FUNNY KITCHEN", "GRUPO CEBANDI", "VALA PADEL",
     "AGRICULTURA Y GANADERIA DEL BAJIO DE RATONES", "Base Ilustre México",
@@ -130,7 +136,8 @@ def parse_cfdi(xml_bytes: bytes) -> dict:
     rec = c.find("cfdi:Receptor", ns)
     rfc = rec.get("Rfc", "") if rec is not None else ""
     nombre = rec.get("Nombre", "") if rec is not None else ""
-    conceptos = [cc.get("Descripcion", "") for cc in c.findall("cfdi:Conceptos/cfdi:Concepto", ns)]
+    nodos = c.findall("cfdi:Conceptos/cfdi:Concepto", ns)
+    conceptos = [cc.get("Descripcion", "") for cc in nodos]
     serie = c.get("Serie") or ""
     folio = c.get("Folio") or ""
     num = (serie + "-" if serie else "") + folio
@@ -148,6 +155,9 @@ def parse_cfdi(xml_bytes: bytes) -> dict:
         "_IVA": (imp.get("TotalImpuestosTrasladados") if imp is not None else "") or "",
         "_UUID": tfd.get("UUID") if tfd is not None else "",
         "_Conceptos": [x for x in conceptos if x],
+        "_Nombre": nombre,
+        "_ClaveSAT": nodos[0].get("ClaveProdServ", "") if nodos else "",
+        "_Tipo": (c.get("TipoDeComprobante") or "").upper(),
     }
 
 def calcular_pago_programado(metodo, fecha_emision) -> str:
@@ -282,6 +292,41 @@ def aplicar_factura(full: pd.DataFrame, sel_id: str, datos: dict):
         corregido = True
     return full, corregido
 
+def extraer_xmls(archivos) -> list:
+    """Devuelve [(nombre, bytes)] de los XML subidos sueltos o dentro de ZIPs."""
+    out = []
+    for f in archivos:
+        if f.name.lower().endswith(".zip"):
+            with zipfile.ZipFile(io.BytesIO(f.getvalue())) as z:
+                for n in z.namelist():
+                    base = os.path.basename(n)
+                    if (n.lower().endswith(".xml") and not n.startswith("__MACOSX")
+                            and not base.startswith("._")):
+                        out.append((base, z.read(n)))
+        else:
+            out.append((f.name, f.getvalue()))
+    return out
+
+
+def fila_desde_xml(datos: dict, rid: str, capturo: str) -> dict:
+    """Arma un registro nuevo (Kushki) con lo que trae el XML."""
+    m = montos_xml(datos) or ("", "", "")
+    fila = {c: "" for c in COLUMNS}
+    fila.update({c: datos[c] for c in FACTURA_COLS})
+    fila.update({
+        "CÓDIGO SAT": datos["_ClaveSAT"], "CLIENTE": datos["_Nombre"],
+        "CONCEPTO": datos["Concepto (Factura)"],
+        "PRODUCTO": KUSHKI_PRODUCTO, "Aliado Comercial": KUSHKI_ALIADO,
+        "Asesor": KUSHKI_ASESOR,
+        "SUBTOTAL (INGRESO)": m[0], "IVA": m[1], "TOTAL": m[2],
+        "FOLIO (LISTO P/FACTURA)": datos["Número Factura"],
+        "FECHA DE FACTURACION": datos["Fecha Emisión"],
+        "ESTATUS DE PAGO": "TIMBRADA",
+        "ID": rid, "Capturado_Por": f"{capturo} (XML)",
+    })
+    return fila
+
+
 def filtros_master(df: pd.DataFrame, key: str, estatus: bool = True) -> pd.DataFrame:
     if df.empty:
         return df
@@ -379,6 +424,80 @@ def render_facturacion(df: pd.DataFrame):
                         "success", f"Factura {datos['Número Factura']} ligada a {sel_id}.")
                 st.session_state["factura_sel_id"] = None
                 st.rerun()
+
+    st.divider()
+    st.markdown("### 📦 Carga masiva de facturas Kushki (XML)")
+    st.caption(f"Sube un ZIP o varios XML. Cada factura crea un registro nuevo con "
+               f"Producto «{KUSHKI_PRODUCTO}», Aliado «{KUSHKI_ALIADO}» y Asesor «{KUSHKI_ASESOR}». "
+               f"Solo el Volumen se completa a mano.")
+    lote = st.file_uploader("ZIP o XMLs", type=["zip", "xml"], accept_multiple_files=True,
+                            key=f"lote_xml_{st.session_state.get('lote_n', 0)}")
+    if lote:
+        existentes = set(df["Número Factura"].astype(str).str.upper().str.strip()) - {""}
+        nuevas, omitidas = [], []
+        try:
+            xmls = extraer_xmls(lote)
+        except zipfile.BadZipFile:
+            xmls = []
+            st.error("El ZIP está dañado o no es un ZIP válido.")
+        for nom, contenido in xmls:
+            try:
+                datos = parse_cfdi(contenido)
+            except Exception:
+                omitidas.append(f"{nom}: no se pudo leer")
+                continue
+            if datos["_Tipo"] and datos["_Tipo"] != "I":
+                omitidas.append(f"{nom}: no es factura de ingreso (tipo {datos['_Tipo']})")
+                continue
+            num = datos["Número Factura"].upper().strip()
+            if num and num in existentes:
+                omitidas.append(f"{nom}: la factura {datos['Número Factura']} ya está en el registro")
+                continue
+            existentes.add(num)
+            nuevas.append((nom, datos))
+
+        if omitidas:
+            with st.expander(f"⏭️ {len(omitidas)} archivo(s) omitido(s)"):
+                st.markdown("\n".join(f"- {o}" for o in omitidas))
+        if not nuevas:
+            st.info("No hay facturas nuevas para crear.")
+        else:
+            prev_lote = pd.DataFrame([{
+                "Aplicar": True, "Archivo": nom, "Factura": d["Número Factura"],
+                "Cliente": d["_Nombre"], "Concepto": d["Concepto (Factura)"],
+                "Emisión": d["Fecha Emisión"], "Método": d["Método de Pago"],
+                "Total": fmt_money(d["_Total"]),
+                "BASE (Volumen)": float("nan"),
+            } for nom, d in nuevas])
+            ro = ["Archivo", "Factura", "Cliente", "Concepto", "Emisión", "Método", "Total"]
+            cfg_lote = {c: st.column_config.TextColumn(c, disabled=True) for c in ro}
+            cfg_lote["BASE (Volumen)"] = st.column_config.NumberColumn(
+                "BASE (Volumen)", min_value=0.0, format="$%.2f")
+            st.markdown(f"**{len(nuevas)} factura(s) nuevas** — captura el Volumen (o déjalo para después) y crea los registros:")
+            editado_lote = st.data_editor(
+                prev_lote, use_container_width=True, hide_index=True, num_rows="fixed",
+                key=f"editor_lote_{abs(hash(tuple(n for n, _ in nuevas)))}", column_config=cfg_lote)
+            if st.button("➕ Crear registros desde los XML"):
+                full = leer_registros()
+                n_id = int(siguiente_id(full).replace("MOV-", ""))
+                filas = []
+                for i, r in editado_lote.iterrows():
+                    if r["Aplicar"] != True:
+                        continue
+                    fila = fila_desde_xml(nuevas[i][1], f"MOV-{n_id:05d}", nombre)
+                    n_id += 1
+                    if pd.notna(r["BASE (Volumen)"]):
+                        fila["BASE (Volumen)"] = r["BASE (Volumen)"]
+                    filas.append(fila)
+                if filas:
+                    sobrescribir_registros(pd.concat([full, pd.DataFrame(filas)], ignore_index=True))
+                    st.session_state["flash"] = (
+                        "success", f"✅ {len(filas)} registro(s) creados desde XML "
+                                   f"({filas[0]['ID']} a {filas[-1]['ID']}).")
+                    st.session_state["lote_n"] = st.session_state.get("lote_n", 0) + 1
+                    st.rerun()
+                else:
+                    st.info("No marcaste ninguna factura.")
 
     st.divider()
     df_m = filtros_master(df, "mf")
