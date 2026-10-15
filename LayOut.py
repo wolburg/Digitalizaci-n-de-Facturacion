@@ -24,7 +24,7 @@ ASESORES = ["Jorge Orozco", "Andrea Dávila", "Ximena Mora",
 PRODUCTOS = ["FX", "Terminal Punto de Venta", "Crédito",
              "Arrendamiento", "Honorarios / Asesoría", "Credito TPV"]
 
-ESTATUS = ["PENDIENTE", "TIMBRADA", "PAGADA"]
+ESTATUS = ["LISTO", "TIMBRADA", "PAGADA"]
 
 MESES_CORTO = ["ENE", "FEB", "MAR", "ABR", "MAY", "JUN",
                "JUL", "AGO", "SEP", "OCT", "NOV", "DIC"]
@@ -65,7 +65,7 @@ ESTADO_CUENTA_COLS = ["Complemento de Pago", "Pago Real", "Comprobante de Pago",
 MASTER_COLS = [
     "Mes", "Cliente/Proveedor", "Datos", "Asesor", "Producto", "Concepto",
     "Volumen", "Subtotal", "IVA", "Total",
-    "Clave SAT", "Factura", "Emisión", "Método de Pago", "Pago Programado",
+    "Clave SAT", "Factura", "Emisión", "Método de Pago", "Pago Programado", "Fecha de Pago",
     "Complemento de Pago", "Pago Real", "Comprobante de Pago", "Comentarios",
 ]
 
@@ -185,6 +185,7 @@ def layout_a_master(df: pd.DataFrame) -> pd.DataFrame:
     out["Emisión"] = df["Fecha Emisión"].values
     out["Método de Pago"] = df["Método de Pago"].values
     out["Pago Programado"] = [calcular_pago_programado(m, f) for m, f in zip(df["Método de Pago"].values, df["Fecha Emisión"].values)]
+    out["Fecha de Pago"] = df["FECHA DE PAGO"].values
     out["Complemento de Pago"] = df["Complemento de Pago"].values
     out["Pago Real"] = df["Pago Real"].values
     out["Comprobante de Pago"] = df["Comprobante de Pago"].values
@@ -239,6 +240,11 @@ def match_deposito(total, deps):
             return d
     return None
 
+def _fecha_iso(v) -> str:
+    f = pd.to_datetime(str(v).strip() or None, errors="coerce")
+    return f.date().isoformat() if pd.notna(f) else ""
+
+
 def montos_xml(datos):
     total = pd.to_numeric(datos.get("_Total"), errors="coerce")
     if pd.isna(total):
@@ -277,7 +283,7 @@ def aplicar_factura(full: pd.DataFrame, sel_id: str, datos: dict):
         corregido = True
     return full, corregido
 
-def filtros_master(df: pd.DataFrame, key: str) -> pd.DataFrame:
+def filtros_master(df: pd.DataFrame, key: str, estatus: bool = True) -> pd.DataFrame:
     if df.empty:
         return df
     _f = pd.to_datetime(df["FECHA DE FACTURACION"], errors="coerce")
@@ -289,11 +295,11 @@ def filtros_master(df: pd.DataFrame, key: str) -> pd.DataFrame:
         return sorted([x for x in df[col].dropna().unique() if str(x).strip()])
 
     st.markdown("##### 🔎 Filtros")
-    r1 = st.columns(4)
-    f_est = r1[0].multiselect("Estatus de pago", ESTATUS, key=f"{key}_est")
-    f_cli = r1[1].multiselect("Cliente", _opts("CLIENTE"), key=f"{key}_cli")
-    f_ase = r1[2].multiselect("Asesor", _opts("Asesor"), key=f"{key}_ase")
-    f_pro = r1[3].multiselect("Producto", _opts("PRODUCTO"), key=f"{key}_pro")
+    r1 = st.columns(4 if estatus else 3)
+    f_est = r1[0].multiselect("Estatus de pago", ESTATUS, key=f"{key}_est") if estatus else []
+    f_cli = r1[-3].multiselect("Cliente", _opts("CLIENTE"), key=f"{key}_cli")
+    f_ase = r1[-2].multiselect("Asesor", _opts("Asesor"), key=f"{key}_ase")
+    f_pro = r1[-1].multiselect("Producto", _opts("PRODUCTO"), key=f"{key}_pro")
     r2 = st.columns(4)
     f_ali = r2[0].multiselect("Aliado comercial", _opts("Aliado Comercial"), key=f"{key}_ali")
     f_met = r2[1].multiselect("Método de pago", _opts("Método de Pago"), key=f"{key}_met")
@@ -520,7 +526,7 @@ def _get_worksheet():
         ws.append_row(COLUMNS)
 
     if ws.row_values(1) != COLUMNS:
-        ws.update("A1", [COLUMNS])
+        ws.update([COLUMNS], "A1")
 
     return ws
 
@@ -539,6 +545,7 @@ def leer_registros() -> pd.DataFrame:
     df = df.reindex(columns=COLUMNS)
     for c in UPPER_COLS:                     
         df[c] = df[c].fillna("").astype(str).str.upper().replace("NAN", "")
+    df["ESTATUS DE PAGO"] = df["ESTATUS DE PAGO"].replace({"PENDIENTE": "LISTO", "": "LISTO"})
     return df
        
 
@@ -592,6 +599,17 @@ def es_completo(fila) -> bool:
  
 def col_estado(df: pd.DataFrame) -> pd.Series:
     return df.apply(lambda r: "🟢" if es_completo(r) else "🔴", axis=1)
+
+def _color_fila(row):
+    est = str(row.get("ESTATUS DE PAGO", "")).upper()
+    if est == "LISTO":
+        css = "background-color: rgba(59, 130, 246, 0.30)"   
+    elif est == "PAGADA":
+        css = "background-color: rgba(34, 197, 94, 0.30)"    
+    else:
+        css = ""                                             
+    return [css] * len(row)
+
 
 # LOGIN
 authenticator.login("Iniciar sesión", location="main")
@@ -727,7 +745,7 @@ if vista.startswith("📝"):
                     "Aliado Comercial": aliado.strip(), "Asesor": asesor,
                     "BASE (Volumen)": base, "SUBTOTAL (INGRESO)": subtotal,
                     "IVA": iva, "TOTAL": round(subtotal + iva, 2),
-                    "ESTATUS DE PAGO": "PENDIENTE",
+                    "ESTATUS DE PAGO": "LISTO",
                     "ID": siguiente_id(df), "Capturado_Por": nombre,
                 })
                 guardar_registro(fila)
@@ -776,14 +794,17 @@ if vista.startswith("📝"):
             m &= df_v["_FFact"].between(pd.Timestamp(f_ffa[0]), pd.Timestamp(f_ffa[1]))
         if len(f_fpa) == 2:
             m &= df_v["_FPago"].between(pd.Timestamp(f_fpa[0]), pd.Timestamp(f_fpa[1]))
-        filt = df_v[m]
-        es_pag = filt["ESTATUS DE PAGO"].astype(str).str.upper() == "PAGADA"
-        filt_pend, filt_pag = filt[~es_pag], filt[es_pag]
+        es_pag = df_v["ESTATUS DE PAGO"].astype(str).str.upper() == "PAGADA"
+        filt_pend = df_v[m & ~es_pag]
+        todas_pag = df[es_pag]
 
-        def _tabla_lectura(dfx):
-            d = dfx[["CÓDIGO SAT", "CLIENTE", "CONCEPTO", "PRODUCTO", "Asesor",
-                     "BASE (Volumen)", "SUBTOTAL (INGRESO)", "IVA", "TOTAL",
-                     "ESTATUS DE PAGO", "ID"]].copy()
+        def _tabla_lectura(dfx, fecha_pago=False):
+            cols = ["CÓDIGO SAT", "CLIENTE", "CONCEPTO", "PRODUCTO", "Asesor",
+                    "BASE (Volumen)", "SUBTOTAL (INGRESO)", "IVA", "TOTAL",
+                    "ESTATUS DE PAGO", "ID"]
+            if fecha_pago:
+                cols.insert(cols.index("ESTATUS DE PAGO"), "FECHA DE PAGO")
+            d = dfx[cols].copy()
             d.insert(0, "Estado", col_estado(dfx))
             for mc in ["BASE (Volumen)", "SUBTOTAL (INGRESO)", "IVA", "TOTAL"]:
                 d[mc] = d[mc].map(fmt_money)
@@ -817,8 +838,9 @@ if vista.startswith("📝"):
                     "🗑️ Eliminar": st.column_config.CheckboxColumn("🗑️ Eliminar"),
                     "ESTATUS DE PAGO": st.column_config.SelectboxColumn("ESTATUS DE PAGO", options=ESTATUS),
                 }
-                editado = st.data_editor(tabla, use_container_width=True, hide_index=True,
-                                         num_rows="fixed", key="editor_layout", column_config=cfg)
+                editado = st.data_editor(tabla.style.apply(_color_fila, axis=1),
+                                        use_container_width=True, hide_index=True,
+                                        num_rows="fixed", key="editor_layout", column_config=cfg)
 
                 ids_borrar = editado.loc[editado["🗑️ Eliminar"] == True, "ID"].tolist()
                 col_c, col_e = st.columns([1.4, 1.6])
@@ -853,12 +875,14 @@ if vista.startswith("📝"):
                                    file_name="layout_pendientes.xlsx",
                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-            st.markdown(f"#### ✅ Pagadas ({len(filt_pag)})")
-            if filt_pag.empty:
+            st.markdown("#### ✅ Pagadas")
+            if todas_pag.empty:
                 st.caption("Aún no hay registros pagados.")
             else:
+                filt_pag = filtros_master(todas_pag, "pag", estatus=False)
+                st.caption(f"Mostrando {len(filt_pag)} de {len(todas_pag)} registros pagados.")
                 with st.expander("Ver registros pagados", expanded=False):
-                    st.dataframe(_tabla_lectura(filt_pag), use_container_width=True, hide_index=True)
+                    st.dataframe(_tabla_lectura(filt_pag, fecha_pago=True).style.apply(_color_fila, axis=1), use_container_width=True, hide_index=True)
                 etiquetas_pag = {r["ID"]: f'{r["ID"]} — {r["CLIENTE"]} · {fmt_money(r["TOTAL"])}'
                                   for _, r in filt_pag.iterrows()}
                 ids_borrar_pag = st.multiselect(
@@ -884,12 +908,14 @@ if vista.startswith("📝"):
             if filt_pend.empty:
                 st.info("No hay registros pendientes.")
             else:
-                st.dataframe(_tabla_lectura(filt_pend), use_container_width=True, hide_index=True)
-            st.markdown(f"#### ✅ Pagadas ({len(filt_pag)})")
-            if filt_pag.empty:
+                st.dataframe(_tabla_lectura(filt_pend).style.apply(_color_fila, axis=1), use_container_width=True, hide_index=True)
+            st.markdown("#### ✅ Pagadas")
+            if todas_pag.empty:
                 st.caption("Aún no hay registros pagados.")
             else:
-                st.dataframe(_tabla_lectura(filt_pag), use_container_width=True, hide_index=True)
+                filt_pag = filtros_master(todas_pag, "pag", estatus=False)
+                st.caption(f"Mostrando {len(filt_pag)} de {len(todas_pag)} registros pagados.")
+                st.dataframe(_tabla_lectura(filt_pag, fecha_pago=True).style.apply(_color_fila, axis=1),use_container_width=True, hide_index=True)
     if ES_ADMIN:
         st.divider()
         render_facturacion(df)
@@ -901,6 +927,10 @@ if vista.startswith("📝"):
 else:
     st.subheader("🏦 Estado de cuenta")
     st.caption("Sube el PDF del estado de cuenta.")
+
+    _flash = st.session_state.pop("flash_edc", None)
+    if _flash:
+        getattr(st, _flash[0])(_flash[1])
 
     df = leer_registros()
     edc = st.file_uploader("PDF del estado de cuenta", type=["pdf"])
@@ -918,10 +948,14 @@ else:
         for _, r in df.iterrows():
             dep = match_deposito(r["TOTAL"], deps)
             if dep:
+                fp_reg = _fecha_iso(r["FECHA DE PAGO"])
                 filas.append({
                     "Aplicar": True,
                     "ID": r["ID"], "Cliente": r["CLIENTE"],
-                    "Total": fmt_money(r["TOTAL"]), "Pago Real": dep["fecha"],
+                    "Total": fmt_money(r["TOTAL"]),
+                    "Fecha de Pago (registro)": fp_reg,
+                    "Pago Real": dep["fecha"],
+                    "Fecha": "✅" if fp_reg == dep["fecha"] else "⚠️ Se corregirá",
                     "Comprobante de Pago": dep["concepto"],
                     "_pago_real": dep["fecha"], "_comprobante": dep["concepto"],
                 })
@@ -930,27 +964,42 @@ else:
         else:
             prev = pd.DataFrame(filas)
             st.markdown("**Conciliación encontrada** (revisa y marca cuáles aplicar):")
+            n_dif = int((prev["Fecha"] != "✅").sum())
+            if n_dif:
+                st.warning(f"⚠️ {n_dif} registro(s) tienen una FECHA DE PAGO distinta (o vacía) "
+                           f"a la del estado de cuenta. Se corregirá con la fecha del depósito al aplicar.")
+            vis_cols = ["ID", "Cliente", "Total", "Fecha de Pago (registro)", "Pago Real",
+                        "Fecha", "Comprobante de Pago"]
             editado = st.data_editor(
-                prev[["Aplicar", "ID", "Cliente", "Total", "Pago Real",
-                       "Comprobante de Pago"]],
+                prev[["Aplicar"] + vis_cols],
                 use_container_width=True, hide_index=True, num_rows="fixed",
                 key="editor_edc",
                 column_config={c: st.column_config.TextColumn(c, disabled=True)
-                               for c in ["ID", "Cliente", "Total", "Pago Real",
-                                          "Comprobante de Pago"]},
+                               for c in vis_cols},
             )
             if st.button("💾 Aplicar pagos a los registros"):
                 aplicar = editado[editado["Aplicar"] == True]["ID"].tolist()
                 if aplicar:
-                    full = leer_registros()
+                    full = leer_registros().astype(object)
                     ref = prev.set_index("ID")
+                    corregidos = []
                     for rid in aplicar:
                         idx = full.index[full["ID"] == rid]
-                        full.loc[idx, "Pago Real"] = ref.loc[rid, "_pago_real"]
+                        if len(idx) == 0:
+                            continue
+                        pago_real = ref.loc[rid, "_pago_real"]
+                        if _fecha_iso(full.loc[idx[0], "FECHA DE PAGO"]) != pago_real:
+                            full.loc[idx, "FECHA DE PAGO"] = pago_real
+                            corregidos.append(rid)
+                        full.loc[idx, "Pago Real"] = pago_real
                         full.loc[idx, "Comprobante de Pago"] = ref.loc[rid, "_comprobante"]
                         full.loc[idx, "ESTATUS DE PAGO"] = "PAGADA"
                     sobrescribir_registros(full)
-                    st.success(f"✅ Se aplicó el pago a {len(aplicar)} registro(s) con éxito.")
+                    msg = f"✅ Se aplicó el pago a {len(aplicar)} registro(s) con éxito."
+                    if corregidos:
+                        msg += (f" La FECHA DE PAGO no coincidía con el Pago Real y se corrigió "
+                                f"en: {', '.join(corregidos)}.")
+                    st.session_state["flash_edc"] = ("warning" if corregidos else "success", msg)
                     st.rerun()
                 else:
                     st.info("No marcaste ningún registro.")
