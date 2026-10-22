@@ -275,26 +275,19 @@ def montos_xml(datos):
 
 
 
-def aplicar_factura(full: pd.DataFrame, sel_id: str, datos: dict):
-    full = full.astype(object)
-    idx = full.index[full["ID"] == sel_id]
-    if len(idx) == 0:
-        raise ValueError(f"No se encontró el registro {sel_id}")
-
-    for col in FACTURA_COLS:
-        full.loc[idx, col] = datos[col]
-    full.loc[idx, "FECHA DE FACTURACION"] = datos["Fecha Emisión"]
-    full.loc[idx, "FOLIO (LISTO P/FACTURA)"] = datos["Número Factura"]
+def aplicar_factura(reg: pd.Series, datos: dict):
+    """Devuelve (cambios, corregido): las columnas a escribir en el registro al ligar la factura."""
+    cambios = {col: datos[col] for col in FACTURA_COLS}
+    cambios["FECHA DE FACTURACION"] = datos["Fecha Emisión"]
+    cambios["FOLIO (LISTO P/FACTURA)"] = datos["Número Factura"]
 
     corregido = False
     m = montos_xml(datos)
-    reg_total = pd.to_numeric(full.loc[idx[0], "TOTAL"], errors="coerce")
+    reg_total = pd.to_numeric(reg["TOTAL"], errors="coerce")
     if m is not None and (pd.isna(reg_total) or abs(m[2] - float(reg_total)) > 0.01):
-        full.loc[idx, "SUBTOTAL (INGRESO)"] = m[0]
-        full.loc[idx, "IVA"] = m[1]
-        full.loc[idx, "TOTAL"] = m[2]
+        cambios.update({"SUBTOTAL (INGRESO)": m[0], "IVA": m[1], "TOTAL": m[2]})
         corregido = True
-    return full, corregido
+    return cambios, corregido
 
 def extraer_xmls(archivos) -> list:
     """Devuelve [(nombre, bytes)] de los XML subidos sueltos o dentro de ZIPs."""
@@ -415,8 +408,8 @@ def render_facturacion(df: pd.DataFrame):
             except Exception:
                 pass
             if st.button("💾 Guardar factura en el registro"):
-                full, corregido = aplicar_factura(leer_registros(), sel_id, datos)
-                sobrescribir_registros(full)
+                cambios, corregido = aplicar_factura(df.loc[df["ID"] == sel_id].iloc[0], datos)
+                actualizar_registros({sel_id: cambios})
                 if corregido:
                     st.session_state["flash"] = (
                         "warning",
@@ -494,7 +487,7 @@ def render_facturacion(df: pd.DataFrame):
                         fila["BASE (Volumen)"] = r["BASE (Volumen)"]
                     filas.append(fila)
                 if filas:
-                    sobrescribir_registros(pd.concat([full, pd.DataFrame(filas)], ignore_index=True))
+                    agregar_registros(filas)
                     st.session_state["flash"] = (
                         "success", f"✅ {len(filas)} registro(s) creados desde XML "
                                    f"({filas[0]['ID']} a {filas[-1]['ID']}).")
@@ -574,7 +567,7 @@ CSV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "lay
 CLIENTES_FX_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "clientes_fx.txt")
 
 
-def cargar_clientes_fx() -> list:
+def _clientes_fx_locales() -> list:
     if os.path.exists(CLIENTES_FX_PATH):
         with open(CLIENTES_FX_PATH, encoding="utf-8") as f:
             xs = [l.strip() for l in f if l.strip()]
@@ -582,14 +575,39 @@ def cargar_clientes_fx() -> list:
     return list(CLIENTES_FX_DEFAULT)
 
 
+@st.cache_resource(show_spinner=False)
+def _get_ws_clientes():
+    """Pestaña «ClientesFX» del mismo Google Sheet (se crea con la lista inicial si no existe)."""
+    import gspread
+    sh = _get_worksheet().spreadsheet
+    try:
+        ws = sh.worksheet("ClientesFX")
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title="ClientesFX", rows=500, cols=1)
+    if len(ws.col_values(1)) <= 1:
+        ws.update([["CLIENTE"]] + [[c] for c in _clientes_fx_locales()], "A1")
+    return ws
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cargar_clientes_fx() -> list:
+    if _usar_sheets():
+        xs = [v.strip() for v in _get_ws_clientes().col_values(1)[1:] if v.strip()]
+        return xs or list(CLIENTES_FX_DEFAULT)
+    return _clientes_fx_locales()
+
+
 def agregar_cliente_fx(nombre: str):
     nombre = nombre.strip()
     xs = cargar_clientes_fx()
     if nombre and nombre not in xs:
-        xs.append(nombre)
-        os.makedirs(os.path.dirname(CLIENTES_FX_PATH), exist_ok=True)
-        with open(CLIENTES_FX_PATH, "w", encoding="utf-8") as f:
-            f.write("\n".join(xs))
+        if _usar_sheets():
+            _get_ws_clientes().append_row([nombre])
+        else:
+            os.makedirs(os.path.dirname(CLIENTES_FX_PATH), exist_ok=True)
+            with open(CLIENTES_FX_PATH, "w", encoding="utf-8") as f:
+                f.write("\n".join(xs + [nombre]))
+        cargar_clientes_fx.clear()
 
 
 def _usar_sheets() -> bool:
@@ -677,29 +695,102 @@ def leer_registros() -> pd.DataFrame:
        
 
 
-def guardar_registro(fila: dict):
-    """Agrega un registro nuevo al backend (Sheets o CSV)."""
-    row = [str(fila.get(c, "")).upper() if c in COLUMNS else str(fila.get(c, ""))
-       for c in COLUMNS]
+# Las escrituras tocan solo las filas/celdas necesarias (nunca se borra y reescribe la hoja
+# completa), y ubican cada registro por su ID leyendo la hoja en ese momento, sin caché.
+
+def _celda(v) -> str:
+    if v is None or (not isinstance(v, str) and pd.isna(v)):
+        return ""
+    return str(v)
+
+
+def _igual(a, b) -> bool:
+    va, vb = _celda(a).strip(), _celda(b).strip()
+    if va == vb:
+        return True
+    try:
+        return abs(float(va) - float(vb)) < 0.005
+    except ValueError:
+        return False
+
+
+def _leer_csv() -> pd.DataFrame:
+    if os.path.exists(CSV_PATH):
+        return pd.read_csv(CSV_PATH, dtype=str).reindex(columns=COLUMNS).fillna("")
+    return pd.DataFrame(columns=COLUMNS)
+
+
+def _escribir_csv(df: pd.DataFrame):
+    os.makedirs(os.path.dirname(CSV_PATH), exist_ok=True)
+    df.to_csv(CSV_PATH, index=False)
+
+
+def _filas_por_id(ws) -> dict:
+    """ID -> número de fila en la hoja."""
+    ids = ws.col_values(COLUMNS.index("ID") + 1)[1:]
+    return {str(v).strip(): i + 2 for i, v in enumerate(ids) if str(v).strip()}
+
+
+def agregar_registros(filas: list, value_input_option: str = "RAW"):
+    """Agrega registros nuevos al final, sin tocar los existentes."""
+    rows = [[_celda(f.get(c, "")) for c in COLUMNS] for f in filas]
+    if not rows:
+        return
     if _usar_sheets():
-        _get_worksheet().append_row(row, value_input_option="USER_ENTERED")
+        _get_worksheet().append_rows(rows, value_input_option=value_input_option)
     else:
-        os.makedirs(os.path.dirname(CSV_PATH), exist_ok=True)
-        df = leer_registros()
-        df.loc[len(df)] = row
-        df.to_csv(CSV_PATH, index=False)
+        _escribir_csv(pd.concat([_leer_csv(), pd.DataFrame(rows, columns=COLUMNS)], ignore_index=True))
     leer_registros.clear()
 
 
-def sobrescribir_registros(df: pd.DataFrame):
-    df = df.reindex(columns=COLUMNS).fillna("")
+def guardar_registro(fila: dict):
+    """Agrega un registro nuevo al backend (Sheets o CSV)."""
+    agregar_registros([{c: str(fila.get(c, "")).upper() for c in COLUMNS}], "USER_ENTERED")
+
+
+def actualizar_registros(cambios: dict) -> list:
+    """Escribe solo las celdas que cambiaron. cambios = {ID: {columna: valor}}.
+    Devuelve los IDs que ya no existen (p. ej. alguien más los borró)."""
+    cambios = {rid: c for rid, c in cambios.items() if c}
+    if not cambios:
+        return []
+    if _usar_sheets():
+        from gspread.utils import rowcol_to_a1
+        ws = _get_worksheet()
+        filas = _filas_por_id(ws)
+        datos = [{"range": rowcol_to_a1(filas[rid], COLUMNS.index(col) + 1), "values": [[_celda(v)]]}
+                 for rid, cols in cambios.items() if rid in filas for col, v in cols.items()]
+        if datos:
+            ws.batch_update(datos)
+        faltan = [rid for rid in cambios if rid not in filas]
+    else:
+        df = _leer_csv()
+        faltan = [rid for rid in cambios if rid not in set(df["ID"])]
+        for rid, cols in cambios.items():
+            idx = df.index[df["ID"] == rid]
+            for col, v in cols.items():
+                df.loc[idx, col] = _celda(v)
+        _escribir_csv(df)
+    leer_registros.clear()
+    return faltan
+
+
+def eliminar_registros(ids: list):
+    """Borra solo las filas de esos IDs."""
+    if not ids:
+        return
     if _usar_sheets():
         ws = _get_worksheet()
-        ws.clear()
-        ws.update([COLUMNS] + df.astype(str).values.tolist(), "A1")
+        filas = _filas_por_id(ws)
+        # De abajo hacia arriba, en una sola llamada, para que los números de fila no se recorran
+        reqs = [{"deleteDimension": {"range": {"sheetId": ws.id, "dimension": "ROWS",
+                                               "startIndex": n - 1, "endIndex": n}}}
+                for n in sorted((filas[i] for i in ids if i in filas), reverse=True)]
+        if reqs:
+            ws.spreadsheet.batch_update({"requests": reqs})
     else:
-        os.makedirs(os.path.dirname(CSV_PATH), exist_ok=True)
-        df.to_csv(CSV_PATH, index=False)
+        df = _leer_csv()
+        _escribir_csv(df[~df["ID"].isin(ids)])
     leer_registros.clear()
 
 
@@ -918,6 +1009,9 @@ if vista.startswith("📝"):
  
     st.divider()
     st.subheader("📋 Registros")
+    _flash = st.session_state.pop("flash_layout", None)
+    if _flash:
+        getattr(st, _flash[0])(_flash[1])
 
     if df.empty:
         st.info("Aún no hay registros.")
@@ -980,13 +1074,46 @@ if vista.startswith("📝"):
         if filt.empty:
             st.info("No hay registros con esos filtros.")
         elif ES_ADMIN:
-            tabla = filt[cols_tabla].copy()
-            tabla.insert(0, "Estado", col_estado(filt))
-            tabla.insert(1, "ESTATUS DE PAGO", filt["ESTATUS DE PAGO"])
+            # Cambios sin guardar, por ID: sobreviven a los cambios de filtro
+            pend = st.session_state.setdefault("layout_pend", {})
+            ver = st.session_state.get("layout_ver", 0)
+
+            orig = filt[cols_tabla].copy()
+            orig.insert(0, "Estado", col_estado(filt))
+            orig.insert(1, "ESTATUS DE PAGO", filt["ESTATUS DE PAGO"])
             for mc in MONEY_COLS:
-                tabla[mc] = pd.to_numeric(tabla[mc], errors="coerce")
-            tabla["🗑️ Eliminar"] = False
-            tabla = agrupar_por_mes(tabla)
+                orig[mc] = pd.to_numeric(orig[mc], errors="coerce")
+            orig_id = orig.drop_duplicates("ID").set_index("ID")
+            firma = abs(hash((ver, int(pd.util.hash_pandas_object(orig, index=False).sum()))))
+
+            def _pendiente(col, v):
+                """Normaliza un valor editado; None si no se debe guardar."""
+                if col not in EDITABLE_COLS or (col == "ESTATUS DE PAGO" and v == "FALTANTE"):
+                    return None
+                return v.upper() if col in UPPER_COLS and isinstance(v, str) else v
+
+            # La tabla que recibe el editor solo se rearma cuando cambian los filtros o los datos;
+            # si cambiara en cada edición, Streamlit reiniciaría el editor y se perderían cambios.
+            snap = st.session_state.get("layout_snap")
+            if not snap or snap[0] != firma:
+                if snap:
+                    # Rescatar lo editado en la tabla anterior que aún no se había procesado
+                    previo = st.session_state.get(f"editor_layout_{snap[0]}") or {}
+                    for fila, cols in previo.get("edited_rows", {}).items():
+                        rid = snap[1].iloc[int(fila)]["ID"]
+                        for col, v in cols.items():
+                            v = _pendiente(col, v)
+                            if rid and v is not None:
+                                pend.setdefault(rid, {})[col] = v
+                base = orig.copy()
+                for rid, cols in pend.items():
+                    idx = base.index[base["ID"] == rid]
+                    for col, v in cols.items():
+                        base.loc[idx, col] = v
+                base["🗑️ Eliminar"] = False
+                snap = (firma, agrupar_por_mes(base))
+                st.session_state["layout_snap"] = snap
+            tabla = snap[1]
             cfg = {
                 "Estado": st.column_config.TextColumn("Estado", disabled=True),
                 "ID": st.column_config.TextColumn("ID", disabled=True),
@@ -1001,10 +1128,28 @@ if vista.startswith("📝"):
             }
             editado = st.data_editor(tabla.style.apply(_color_fila, axis=1),
                                     use_container_width=True, hide_index=True, num_rows="fixed",
-                                    key=f"editor_layout_{abs(hash(tuple(filt['ID'])))}",
-                                    column_config=cfg)
+                                    key=f"editor_layout_{firma}", column_config=cfg)
             # Las filas en blanco (separadores de mes) no tienen ID y se ignoran
             editado = editado[editado["ID"].fillna("").astype(str).str.strip() != ""]
+
+            # Pendientes de las filas visibles = lo que difiere de lo guardado
+            for _, r in editado.iterrows():
+                rid = r["ID"]
+                cambios = {}
+                for col in EDITABLE_COLS:
+                    v = _pendiente(col, r[col])
+                    if v is not None and not _igual(v, orig_id.at[rid, col]):
+                        cambios[col] = v
+                if cambios:
+                    pend[rid] = cambios
+                else:
+                    pend.pop(rid, None)
+
+            if pend:
+                ocultos = len(set(pend) - set(orig["ID"]))
+                st.warning(f"✏️ Tienes cambios sin guardar en {len(pend)} registro(s)"
+                           + (f" ({ocultos} no se ven con los filtros actuales)" if ocultos else "")
+                           + ". Se conservan aunque cambies los filtros; dale «💾 Guardar cambios» para guardarlos.")
 
             ids_borrar = editado.loc[editado["🗑️ Eliminar"] == True, "ID"].tolist()
             col_c, col_e = st.columns([1.4, 1.6])
@@ -1012,28 +1157,45 @@ if vista.startswith("📝"):
                 confirmar = st.checkbox(f"Confirmar borrado ({len(ids_borrar)})", disabled=not ids_borrar)
             with col_e:
                 if st.button("🗑️ Eliminar seleccionados", disabled=not (ids_borrar and confirmar)):
-                    full = leer_registros()
-                    full = full[~full["ID"].isin(ids_borrar)]
-                    sobrescribir_registros(full)
-                    st.success(f"🗑️ {len(ids_borrar)} registro(s) eliminado(s).")
+                    eliminar_registros(ids_borrar)
+                    for rid in ids_borrar:
+                        pend.pop(rid, None)
+                    st.session_state["layout_ver"] = ver + 1
+                    st.session_state["flash_layout"] = (
+                        "success", f"🗑️ {len(ids_borrar)} registro(s) eliminado(s).")
                     st.rerun()
 
-            if st.button("💾 Guardar cambios"):
-                full = leer_registros().astype(object)
-                for _, r in editado.iterrows():
-                    idx = full.index[full["ID"] == r["ID"]]
-                    if len(idx):
-                        for col in EDITABLE_COLS:
-                            # FALTANTE es solo de vista: se conserva el estatus guardado
-                            if col == "ESTATUS DE PAGO" and r[col] == "FALTANTE":
-                                continue
-                            full.loc[idx, col] = r[col]
-                        full.loc[idx, "Pago Real"] = r["FECHA DE PAGO"]
-                sub = pd.to_numeric(full["SUBTOTAL (INGRESO)"], errors="coerce").fillna(0)
-                full["IVA"] = (sub * IVA_RATE).round(2)
-                full["TOTAL"] = (sub + sub * IVA_RATE).round(2)
-                sobrescribir_registros(full)
-                st.success("✅ Cambios guardados.")
+            col_g, col_d = st.columns([1.4, 1.6])
+            with col_g:
+                guardar = st.button("💾 Guardar cambios", disabled=not pend)
+            with col_d:
+                if st.button("↩️ Descartar cambios", disabled=not pend):
+                    pend.clear()
+                    st.session_state["layout_ver"] = ver + 1
+                    st.rerun()
+            if guardar:
+                cambios = {}
+                for rid, cols in pend.items():
+                    c = dict(cols)
+                    # IVA y TOTAL solo se recalculan si cambió el SUBTOTAL de ese registro
+                    if "SUBTOTAL (INGRESO)" in c:
+                        sub = pd.to_numeric(c["SUBTOTAL (INGRESO)"], errors="coerce")
+                        sub = 0.0 if pd.isna(sub) else float(sub)
+                        c["IVA"] = round(sub * IVA_RATE, 2)
+                        c["TOTAL"] = round(sub + sub * IVA_RATE, 2)
+                    if "FECHA DE PAGO" in c:
+                        c["Pago Real"] = c["FECHA DE PAGO"]
+                    cambios[rid] = c
+                faltan = actualizar_registros(cambios)
+                pend.clear()
+                st.session_state["layout_ver"] = ver + 1
+                if faltan:
+                    st.session_state["flash_layout"] = (
+                        "warning", f"Cambios guardados, excepto en {', '.join(faltan)}: "
+                                   f"ya no existen (alguien más los borró).")
+                else:
+                    st.session_state["flash_layout"] = (
+                        "success", f"✅ Cambios guardados en {len(cambios)} registro(s).")
                 st.rerun()
 
             buf = io.BytesIO()
@@ -1110,21 +1272,17 @@ else:
             if st.button("💾 Aplicar pagos a los registros"):
                 aplicar = editado[editado["Aplicar"] == True]["ID"].tolist()
                 if aplicar:
-                    full = leer_registros().astype(object)
                     ref = prev.set_index("ID")
-                    corregidos = []
+                    cambios, corregidos = {}, []
                     for rid in aplicar:
-                        idx = full.index[full["ID"] == rid]
-                        if len(idx) == 0:
-                            continue
                         pago_real = ref.loc[rid, "_pago_real"]
-                        if _fecha_iso(full.loc[idx[0], "FECHA DE PAGO"]) != pago_real:
-                            full.loc[idx, "FECHA DE PAGO"] = pago_real
+                        cambios[rid] = {"Pago Real": pago_real,
+                                        "Comprobante de Pago": ref.loc[rid, "_comprobante"],
+                                        "ESTATUS DE PAGO": "PAGADA"}
+                        if ref.loc[rid, "Fecha de pago (registro)"] != pago_real:
+                            cambios[rid]["FECHA DE PAGO"] = pago_real
                             corregidos.append(rid)
-                        full.loc[idx, "Pago Real"] = pago_real
-                        full.loc[idx, "Comprobante de Pago"] = ref.loc[rid, "_comprobante"]
-                        full.loc[idx, "ESTATUS DE PAGO"] = "PAGADA"
-                    sobrescribir_registros(full)
+                    actualizar_registros(cambios)
                     msg = f"✅ Se aplicó el pago a {len(aplicar)} registro(s) con éxito."
                     if corregidos:
                         msg += (f" La fecha de pago no coincidía con el estado de cuenta y se corrigió "
