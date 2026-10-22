@@ -27,6 +27,10 @@ PRODUCTOS = ["FX", "Terminal Punto de Venta", "Crédito",
 
 ESTATUS = ["LISTO", "TIMBRADA", "PAGADA"]
 
+# FALTANTE solo se muestra en pantalla (pago programado vencido y no PAGADA); no se guarda
+ESTATUS_VISTA = ["FALTANTE"] + ESTATUS
+ESTATUS_ORDEN = {e: i for i, e in enumerate(ESTATUS_VISTA)}
+
 MESES_CORTO = ["ENE", "FEB", "MAR", "ABR", "MAY", "JUN",
                "JUL", "AGO", "SEP", "OCT", "NOV", "DIC"]
 
@@ -723,9 +727,46 @@ def es_completo(fila) -> bool:
 def col_estado(df: pd.DataFrame) -> pd.Series:
     return df.apply(lambda r: "🟢" if es_completo(r) else "🔴", axis=1)
 
+def pago_programado(df: pd.DataFrame) -> pd.Series:
+    return pd.Series([calcular_pago_programado(m, f)
+                      for m, f in zip(df["Método de Pago"].values, df["Fecha Emisión"].values)],
+                     index=df.index)
+
+
+def estatus_vista(df: pd.DataFrame) -> pd.Series:
+    """ESTATUS DE PAGO con FALTANTE cuando el pago programado ya venció y no está PAGADA."""
+    est = df["ESTATUS DE PAGO"].astype(str).str.upper()
+    pp = pago_programado(df)
+    vencido = (pp != "") & (pp < date.today().isoformat()) & (est != "PAGADA")
+    return est.where(~vencido, "FALTANTE")
+
+
+def agrupar_por_mes(d: pd.DataFrame) -> pd.DataFrame:
+    """Ordena por mes de facturación (reciente primero, sin fecha hasta arriba) y por estatus,
+    con una fila en blanco entre meses."""
+    if d.empty:
+        return d
+    f = pd.to_datetime(d["FECHA DE FACTURACION"], errors="coerce")
+    mes = (f.dt.year * 100 + f.dt.month).fillna(999999)
+    orden = d["ESTATUS DE PAGO"].map(ESTATUS_ORDEN).fillna(len(ESTATUS_ORDEN))
+    d = d.assign(_mes=mes, _ord=orden).sort_values(["_mes", "_ord"], ascending=[False, True],
+                                                  kind="stable")
+    blanco = {c: (False if pd.api.types.is_bool_dtype(d[c])
+                  else float("nan") if pd.api.types.is_numeric_dtype(d[c]) else "")
+              for c in d.columns}
+    partes = []
+    for i, (_, g) in enumerate(d.groupby("_mes", sort=False)):
+        if i:
+            partes.append(pd.DataFrame([blanco]))
+        partes.append(g)
+    return pd.concat(partes, ignore_index=True).drop(columns=["_mes", "_ord"])
+
+
 def _color_fila(row):
     est = str(row.get("ESTATUS DE PAGO", "")).upper()
-    if est == "LISTO":
+    if est == "FALTANTE":
+        css = "background-color: rgba(239, 68, 68, 0.30)"
+    elif est == "LISTO":
         css = "background-color: rgba(59, 130, 246, 0.30)"   
     elif est == "PAGADA":
         css = "background-color: rgba(34, 197, 94, 0.30)"    
@@ -876,20 +917,19 @@ if vista.startswith("📝"):
                 df = leer_registros()
  
     st.divider()
-    st.subheader("Registros capturados")
- 
+    st.subheader("📋 Registros")
+
     if df.empty:
         st.info("Aún no hay registros.")
     else:
-        estado = col_estado(df)
         _f = pd.to_datetime(df["FECHA DE FACTURACION"], errors="coerce")
         _fp = df["FECHA DE PAGO"].fillna("").astype(str).str.strip()
         _pr = df["Pago Real"].fillna("").astype(str)
         _p = pd.to_datetime(_fp.where(_fp != "", _pr), errors="coerce")
 
         df_v = df.copy()
-        df_v["_Año"] = _f.dt.year
-        df_v["_Mes"] = _f.map(lambda d: f"{MESES_CORTO[d.month - 1]}-{d.year}" if pd.notna(d) else "")
+        df_v["ESTATUS DE PAGO"] = estatus_vista(df)
+        df_v["PAGO PROGRAMADO"] = pago_programado(df)
         df_v["_FFact"] = _f
         df_v["_FPago"] = _p
 
@@ -898,7 +938,7 @@ if vista.startswith("📝"):
 
         st.markdown("##### 🔎 Filtros")
         r1 = st.columns(4)
-        f_est = r1[0].multiselect("Estatus de pago", ESTATUS)
+        f_est = r1[0].multiselect("Estatus de pago", ESTATUS_VISTA)
         f_cli = r1[1].multiselect("Cliente", _opts("CLIENTE"))
         f_ase = r1[2].multiselect("Asesor", _opts("Asesor"))
         f_pro = r1[3].multiselect("Producto", _opts("PRODUCTO"))
@@ -908,7 +948,7 @@ if vista.startswith("📝"):
         f_fpa = r2[2].date_input("Fecha de pago (rango)", value=(), format="YYYY-MM-DD", key="f_fpa")
 
         m = pd.Series(True, index=df_v.index)
-        if f_est: m &= df_v["ESTATUS DE PAGO"].astype(str).str.upper().isin(f_est)
+        if f_est: m &= df_v["ESTATUS DE PAGO"].isin(f_est)
         if f_cli: m &= df_v["CLIENTE"].isin(f_cli)
         if f_ase: m &= df_v["Asesor"].isin(f_ase)
         if f_pro: m &= df_v["PRODUCTO"].isin(f_pro)
@@ -917,159 +957,95 @@ if vista.startswith("📝"):
             m &= df_v["_FFact"].between(pd.Timestamp(f_ffa[0]), pd.Timestamp(f_ffa[1]))
         if len(f_fpa) == 2:
             m &= df_v["_FPago"].between(pd.Timestamp(f_fpa[0]), pd.Timestamp(f_fpa[1]))
-        es_pag = df_v["ESTATUS DE PAGO"].astype(str).str.upper() == "PAGADA"
-        filt_pend = df_v[m & ~es_pag]
-        todas_pag = df[es_pag]
+        filt = df_v[m]
 
-        def _tabla_lectura(dfx, fecha_pago=False):
+        # Columnas de la tabla: PAGO PROGRAMADO (solo lectura) junto a FECHA DE PAGO
+        cols_tabla = [c for c in LAYOUT_COLS if c != "ESTATUS DE PAGO"]
+        cols_tabla.insert(cols_tabla.index("FECHA DE PAGO") + 1, "PAGO PROGRAMADO")
+
+        def _tabla_lectura(dfx):
             cols = ["CÓDIGO SAT", "CLIENTE", "CONCEPTO", "PRODUCTO", "Asesor",
                     "BASE (Volumen)", "SUBTOTAL (INGRESO)", "IVA", "TOTAL",
-                    "ESTATUS DE PAGO", "ID"]
-            if fecha_pago:
-                cols.insert(cols.index("ESTATUS DE PAGO"), "FECHA DE PAGO")
+                    "FECHA DE FACTURACION", "FECHA DE PAGO", "PAGO PROGRAMADO", "ID"]
             d = dfx[cols].copy()
             d.insert(0, "Estado", col_estado(dfx))
+            d.insert(1, "ESTATUS DE PAGO", dfx["ESTATUS DE PAGO"])
             for mc in ["BASE (Volumen)", "SUBTOTAL (INGRESO)", "IVA", "TOTAL"]:
                 d[mc] = d[mc].map(fmt_money)
-            d = d[["Estado", "ESTATUS DE PAGO"] +
-                  [c for c in d.columns if c not in ("Estado", "ESTATUS DE PAGO")]]
-            return d
+            return agrupar_por_mes(d)
 
-        if ES_ADMIN:
-            # ===== PENDIENTES (rejilla editable) =====
-            st.markdown(f"#### 🟠 Pendientes ({len(filt_pend)})")
-            if filt_pend.empty:
-                st.info("No hay registros pendientes.")
-            else:
-                tabla = filt_pend[LAYOUT_COLS].copy()
-                tabla.insert(0, "Estado", col_estado(filt_pend))
-                for mc in MONEY_COLS:
-                    tabla[mc] = pd.to_numeric(tabla[mc], errors="coerce")
-                tabla["🗑️ Eliminar"] = False
-                tabla = tabla[["Estado", "ESTATUS DE PAGO"] +
-                              [c for c in tabla.columns
-                               if c not in ("Estado", "ESTATUS DE PAGO", "🗑️ Eliminar")] +
-                              ["🗑️ Eliminar"]]
-                cfg = {
-                    "Estado": st.column_config.TextColumn("Estado", disabled=True),
-                    "ID": st.column_config.TextColumn("ID", disabled=True),
-                    "Capturado_Por": st.column_config.TextColumn("Capturado_Por", disabled=True),
-                    "IVA": st.column_config.NumberColumn("IVA", disabled=True, format="$%.2f"),
-                    "TOTAL": st.column_config.NumberColumn("TOTAL", disabled=True, format="$%.2f"),
-                    "BASE (Volumen)": st.column_config.NumberColumn("BASE (Volumen)", format="$%.2f"),
-                    "SUBTOTAL (INGRESO)": st.column_config.NumberColumn("SUBTOTAL (INGRESO)", format="$%.2f"),
-                    "🗑️ Eliminar": st.column_config.CheckboxColumn("🗑️ Eliminar"),
-                    "ESTATUS DE PAGO": st.column_config.SelectboxColumn("ESTATUS DE PAGO", options=ESTATUS),
-                }
-                editado = st.data_editor(tabla.style.apply(_color_fila, axis=1),
-                                        use_container_width=True, hide_index=True,
-                                        num_rows="fixed", key="editor_layout", column_config=cfg)
+        st.markdown(f"#### Registros ({len(filt)})")
+        st.caption("Ordenados por mes de facturación: FALTANTE, LISTO, TIMBRADA y PAGADA. "
+                   "FALTANTE = ya pasó el pago programado y no está pagada.")
+        if filt.empty:
+            st.info("No hay registros con esos filtros.")
+        elif ES_ADMIN:
+            tabla = filt[cols_tabla].copy()
+            tabla.insert(0, "Estado", col_estado(filt))
+            tabla.insert(1, "ESTATUS DE PAGO", filt["ESTATUS DE PAGO"])
+            for mc in MONEY_COLS:
+                tabla[mc] = pd.to_numeric(tabla[mc], errors="coerce")
+            tabla["🗑️ Eliminar"] = False
+            tabla = agrupar_por_mes(tabla)
+            cfg = {
+                "Estado": st.column_config.TextColumn("Estado", disabled=True),
+                "ID": st.column_config.TextColumn("ID", disabled=True),
+                "Capturado_Por": st.column_config.TextColumn("Capturado_Por", disabled=True),
+                "PAGO PROGRAMADO": st.column_config.TextColumn("PAGO PROGRAMADO", disabled=True),
+                "IVA": st.column_config.NumberColumn("IVA", disabled=True, format="$%.2f"),
+                "TOTAL": st.column_config.NumberColumn("TOTAL", disabled=True, format="$%.2f"),
+                "BASE (Volumen)": st.column_config.NumberColumn("BASE (Volumen)", format="$%.2f"),
+                "SUBTOTAL (INGRESO)": st.column_config.NumberColumn("SUBTOTAL (INGRESO)", format="$%.2f"),
+                "🗑️ Eliminar": st.column_config.CheckboxColumn("🗑️ Eliminar"),
+                "ESTATUS DE PAGO": st.column_config.SelectboxColumn("ESTATUS DE PAGO", options=ESTATUS_VISTA),
+            }
+            editado = st.data_editor(tabla.style.apply(_color_fila, axis=1),
+                                    use_container_width=True, hide_index=True, num_rows="fixed",
+                                    key=f"editor_layout_{abs(hash(tuple(filt['ID'])))}",
+                                    column_config=cfg)
+            # Las filas en blanco (separadores de mes) no tienen ID y se ignoran
+            editado = editado[editado["ID"].fillna("").astype(str).str.strip() != ""]
 
-                ids_borrar = editado.loc[editado["🗑️ Eliminar"] == True, "ID"].tolist()
-                col_c, col_e = st.columns([1.4, 1.6])
-                with col_c:
-                    confirmar = st.checkbox(f"Confirmar borrado ({len(ids_borrar)})", disabled=not ids_borrar)
-                with col_e:
-                    if st.button("🗑️ Eliminar seleccionados", disabled=not (ids_borrar and confirmar)):
-                        full = leer_registros()
-                        full = full[~full["ID"].isin(ids_borrar)]
-                        sobrescribir_registros(full)
-                        st.success(f"🗑️ {len(ids_borrar)} registro(s) eliminado(s).")
-                        st.rerun()
-
-                if st.button("💾 Guardar cambios"):
-                    full = leer_registros().astype(object)
-                    for _, r in editado.iterrows():
-                        idx = full.index[full["ID"] == r["ID"]]
-                        if len(idx):
-                            for col in EDITABLE_COLS:
-                                full.loc[idx, col] = r[col]
-                            full.loc[idx, "Pago Real"] = r["FECHA DE PAGO"]
-                    sub = pd.to_numeric(full["SUBTOTAL (INGRESO)"], errors="coerce").fillna(0)
-                    full["IVA"] = (sub * IVA_RATE).round(2)
-                    full["TOTAL"] = (sub + sub * IVA_RATE).round(2)
+            ids_borrar = editado.loc[editado["🗑️ Eliminar"] == True, "ID"].tolist()
+            col_c, col_e = st.columns([1.4, 1.6])
+            with col_c:
+                confirmar = st.checkbox(f"Confirmar borrado ({len(ids_borrar)})", disabled=not ids_borrar)
+            with col_e:
+                if st.button("🗑️ Eliminar seleccionados", disabled=not (ids_borrar and confirmar)):
+                    full = leer_registros()
+                    full = full[~full["ID"].isin(ids_borrar)]
                     sobrescribir_registros(full)
-                    st.success("✅ Cambios guardados.")
+                    st.success(f"🗑️ {len(ids_borrar)} registro(s) eliminado(s).")
                     st.rerun()
 
-                buf = io.BytesIO()
-                with pd.ExcelWriter(buf, engine="openpyxl") as w:
-                    filt_pend[LAYOUT_COLS].to_excel(w, index=False, sheet_name="Pendientes")
-                st.download_button("⬇️ Descargar pendientes en Excel", buf.getvalue(),
-                                   file_name="layout_pendientes.xlsx",
-                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            if st.button("💾 Guardar cambios"):
+                full = leer_registros().astype(object)
+                for _, r in editado.iterrows():
+                    idx = full.index[full["ID"] == r["ID"]]
+                    if len(idx):
+                        for col in EDITABLE_COLS:
+                            # FALTANTE es solo de vista: se conserva el estatus guardado
+                            if col == "ESTATUS DE PAGO" and r[col] == "FALTANTE":
+                                continue
+                            full.loc[idx, col] = r[col]
+                        full.loc[idx, "Pago Real"] = r["FECHA DE PAGO"]
+                sub = pd.to_numeric(full["SUBTOTAL (INGRESO)"], errors="coerce").fillna(0)
+                full["IVA"] = (sub * IVA_RATE).round(2)
+                full["TOTAL"] = (sub + sub * IVA_RATE).round(2)
+                sobrescribir_registros(full)
+                st.success("✅ Cambios guardados.")
+                st.rerun()
 
-            st.markdown("#### ✅ Pagadas")
-            _flash_pag = st.session_state.pop("flash_pag", None)
-            if _flash_pag:
-                getattr(st, _flash_pag[0])(_flash_pag[1])
-            if todas_pag.empty:
-                st.caption("Aún no hay registros pagados.")
-            else:
-                filt_pag = filtros_master(todas_pag, "pag", estatus=False)
-                st.caption(f"Mostrando {len(filt_pag)} de {len(todas_pag)} registros pagados.")
-                with st.expander("Ver registros pagados", expanded=False):
-                    tabla_pag = _tabla_lectura(filt_pag, fecha_pago=True)
-                    tabla_pag["FECHA DE PAGO"] = pd.to_datetime(tabla_pag["FECHA DE PAGO"], errors="coerce").dt.date
-                    cfg_pag = {c: st.column_config.TextColumn(c, disabled=True)
-                               for c in tabla_pag.columns if c != "FECHA DE PAGO"}
-                    cfg_pag["FECHA DE PAGO"] = st.column_config.DateColumn(
-                        "FECHA DE PAGO", format="YYYY-MM-DD", help="Editable a mano")
-                    editado_pag = st.data_editor(
-                        tabla_pag.style.apply(_color_fila, axis=1),
-                        use_container_width=True, hide_index=True, num_rows="fixed",
-                        key=f"editor_pagadas_{abs(hash(tuple(filt_pag['ID'])))}",
-                        column_config=cfg_pag)
-                    if st.button("💾 Guardar fechas de pago"):
-                        full = leer_registros().astype(object)
-                        cambiados = []
-                        for _, r in editado_pag.iterrows():
-                            nueva = _fecha_iso(r["FECHA DE PAGO"])
-                            idx = full.index[full["ID"] == r["ID"]]
-                            if len(idx) and _fecha_iso(full.loc[idx[0], "FECHA DE PAGO"]) != nueva:
-                                full.loc[idx, "FECHA DE PAGO"] = nueva
-                                full.loc[idx, "Pago Real"] = nueva
-                                cambiados.append(r["ID"])
-                        if cambiados:
-                            sobrescribir_registros(full)
-                            st.session_state["flash_pag"] = (
-                                "success", f"✅ Fecha de pago actualizada en: {', '.join(cambiados)}.")
-                        else:
-                            st.session_state["flash_pag"] = ("info", "No hubo cambios en las fechas de pago.")
-                        st.rerun()
-                etiquetas_pag = {r["ID"]: f'{r["ID"]} — {r["CLIENTE"]} · {fmt_money(r["TOTAL"])}'
-                                  for _, r in filt_pag.iterrows()}
-                ids_borrar_pag = st.multiselect(
-                    "Eliminar registro(s) pagado(s)",
-                    options=list(etiquetas_pag.keys()),
-                    format_func=lambda x: etiquetas_pag[x],
-                    key="borrar_pag_sel",
-                )
-                cpg, epg = st.columns([1.4, 1.6])
-                with cpg:
-                    confirmar_pag = st.checkbox(f"Confirmar borrado ({len(ids_borrar_pag)})",
-                                                 disabled=not ids_borrar_pag, key="confirmar_pag")
-                with epg:
-                    if st.button("🗑️ Eliminar pagados seleccionados",
-                                  disabled=not (ids_borrar_pag and confirmar_pag)):
-                        full = leer_registros()
-                        full = full[~full["ID"].isin(ids_borrar_pag)]
-                        sobrescribir_registros(full)
-                        st.success(f"🗑️ {len(ids_borrar_pag)} registro(s) eliminado(s).")
-                        st.rerun()
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as w:
+                agrupar_por_mes(filt[["ESTATUS DE PAGO"] + cols_tabla]).to_excel(
+                    w, index=False, sheet_name="Registros")
+            st.download_button("⬇️ Descargar registros en Excel", buf.getvalue(),
+                               file_name="layout_registros.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         else:
-            st.markdown(f"#### 🟠 Pendientes ({len(filt_pend)})")
-            if filt_pend.empty:
-                st.info("No hay registros pendientes.")
-            else:
-                st.dataframe(_tabla_lectura(filt_pend).style.apply(_color_fila, axis=1), use_container_width=True, hide_index=True)
-            st.markdown("#### ✅ Pagadas")
-            if todas_pag.empty:
-                st.caption("Aún no hay registros pagados.")
-            else:
-                filt_pag = filtros_master(todas_pag, "pag", estatus=False)
-                st.caption(f"Mostrando {len(filt_pag)} de {len(todas_pag)} registros pagados.")
-                st.dataframe(_tabla_lectura(filt_pag, fecha_pago=True).style.apply(_color_fila, axis=1),use_container_width=True, hide_index=True)
+            st.dataframe(_tabla_lectura(filt).style.apply(_color_fila, axis=1),
+                         use_container_width=True, hide_index=True)
     if ES_ADMIN:
         st.divider()
         render_facturacion(df)
