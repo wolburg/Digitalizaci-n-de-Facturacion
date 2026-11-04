@@ -243,7 +243,6 @@ EXTRA_EDIT = ["Aliado Comercial", "CÓDIGO SAT", "FOLIO (LISTO P/FACTURA)", "Com
 
 def tabla_edicion(d: pd.DataFrame, todas: bool) -> pd.DataFrame:
     t = pd.DataFrame({
-        "➕": False,
         "ESTATUS DE PAGO": d["_est"],
         "CLIENTE": d["CLIENTE"], "CONCEPTO": d["CONCEPTO"],
         "PRODUCTO": d["PRODUCTO"], "Asesor": d["Asesor"],
@@ -271,8 +270,6 @@ def _cfg_edicion(d: pd.DataFrame) -> dict:
                                   + sorted(x for x in d[col].dropna().unique() if str(x).strip())))
     ro = lambda label, **kw: st.column_config.Column(label, disabled=True, **kw)
     return {
-        "➕": st.column_config.CheckboxColumn("➕", width="small",
-                                             help="Marca filas para ver su suma (no se guarda)"),
         "ESTATUS DE PAGO": st.column_config.SelectboxColumn("Estatus", options=ESTATUS_VISTA, required=True,
                                                             help="VENCIDA se calcula sola; no se guarda"),
         "CLIENTE": st.column_config.TextColumn("Cliente", width="medium"),
@@ -483,12 +480,18 @@ def pagina_registros():
         st.info("No hay registros con esos filtros.")
         return
 
-    todas = st.toggle("Ver todas las columnas", key="reg_todas")
-    if ES_ADMIN:
-        st.caption("Edita directo en la tabla y presiona «💾 Guardar cambios». Marca 🗑️ para eliminar "
-                   "y ➕ para ver la suma de varias filas. El color de la fila se actualiza al guardar.")
+    t1, t2 = st.columns(2)
+    todas = t1.toggle("Ver todas las columnas", key="reg_todas")
+    sumar = not ES_ADMIN or t2.toggle("➕ Sumar como en Excel", key="reg_sumar",
+                                      help="Las tablas dejan de ser editables y puedes seleccionar "
+                                           "celdas para ver su suma. Apágalo para volver a editar.")
+    editar = ES_ADMIN and not sumar
+    if editar:
+        st.caption("Edita directo en la tabla y presiona «💾 Guardar cambios». Marca 🗑️ para eliminar. "
+                   "El color de la fila se actualiza al guardar.")
     else:
-        st.caption("Selecciona celdas de importes (clic, Shift o Ctrl) para ver su suma.")
+        st.caption("Selecciona importes como en Excel: arrastra, o usa Shift / Ctrl + clic. "
+                   "La suma aparece arriba y abajo de las tablas.")
     arriba = st.container()
     if ES_ADMIN:
         ref = tabla_edicion(d, True).set_index("ID")
@@ -498,7 +501,7 @@ def pagina_registros():
     grupos = list(dict.fromkeys(meses))
     ver_todos = st.session_state.get("reg_todos_meses", False) or hay_filtros
     visibles = grupos if ver_todos else grupos[:MESES_VISIBLES]
-    borrar, ids_visibles, ids_suma, valores = [], [], [], []
+    borrar, ids_visibles, valores = [], [], []
     for i, g in enumerate(visibles):
         sub = filt[meses == g]
         ids_visibles += sub["ID"].tolist()
@@ -511,10 +514,9 @@ def pagina_registros():
             if n_arr:
                 st.caption(f"↪️ Incluye {n_arr} registro(s) de meses anteriores que aún no están pagados "
                            f"(revisa su fecha de facturación).")
-            if ES_ADMIN:
+            if editar:
                 ed = editor_mes(sub, ref, cfg, todas, g)
                 borrar += ed.loc[ed["🗑️ Eliminar"] == True, "ID"].tolist()
-                ids_suma += ed.loc[ed["➕"] == True, "ID"].tolist()
             else:
                 valores += tabla_consulta(sub, todas, g)
     st.session_state["ids_visibles"] = ids_visibles
@@ -525,12 +527,11 @@ def pagina_registros():
             st.session_state["reg_todos_meses"] = True
             st.rerun()
 
-    sel = filt[filt["ID"].isin(ids_suma)]
     with arriba:
-        barra_suma(sel, valores)
+        barra_suma(valores)
         if ES_ADMIN:
             barra_cambios(borrar, "arriba")
-    barra_suma(sel, valores)
+    barra_suma(valores)
     if ES_ADMIN:
         barra_cambios(borrar, "abajo")
 
@@ -562,13 +563,9 @@ def tabla_consulta(sub: pd.DataFrame, todas: bool, mes: str) -> list:
     return valores
 
 
-def barra_suma(sel: pd.DataFrame, valores: list):
-    """Suma de lo seleccionado (filas marcadas con ➕ o celdas seleccionadas)."""
-    if not sel.empty:
-        st.info(f"➕ **{len(sel)} seleccionado(s)** · Volumen {fmt_money(sel['_base'].sum())} · "
-                f"Subtotal {fmt_money(sel['_sub'].sum())} · IVA {fmt_money(sel['_iva'].sum())} · "
-                f"**Total {fmt_money(sel['_total'].sum())}**")
-    elif valores:
+def barra_suma(valores: list):
+    """Suma de las celdas seleccionadas, como la barra de estado de Excel."""
+    if valores:
         st.info(f"➕ **{len(valores)} celda(s)** · Suma **{fmt_money(sum(valores))}** · "
                 f"Promedio {fmt_money(sum(valores) / len(valores))}")
 
