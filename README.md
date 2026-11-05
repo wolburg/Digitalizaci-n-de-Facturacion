@@ -16,7 +16,9 @@ streamlit run LayOut.py
 Sin credenciales de Google, la app corre en **modo local (CSV)** y guarda en `data/`.
 
 ## Estructura
-- `LayOut.py` — aplicación principal.
+- `LayOut.py` — aplicación principal (versión 2): una tabla por mes, edición directa y estatus CANCELADA.
+- `core.py` — reglas y capa de datos que usa `LayOut.py`.
+- `LayOut_v1.py` — versión 1, solo como respaldo. Para regresar a ella, intercambiar los nombres con `LayOut.py`.
 - `requirements.txt` — dependencias.
 - `data/` — datos locales (no se sube al repo).
 

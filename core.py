@@ -1,8 +1,8 @@
 """Lógica compartida de Facturación FIN.ARQ (versión 2).
 
-Copia sin cambios de las reglas de LayOut.py: constantes, lectura de XML CFDI y
+Copia de las reglas de la V1 (LayOut_v1.py): constantes, lectura de XML CFDI y
 estados de cuenta, y la capa de datos (Google Sheets con respaldo en CSV local).
-La interfaz vive en app_v2.py; aquí no se dibuja nada en pantalla.
+La interfaz vive en LayOut.py; aquí no se dibuja nada en pantalla.
 """
 import io
 import os
